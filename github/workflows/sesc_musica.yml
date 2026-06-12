@@ -1,104 +1,84 @@
-name: 🎵 Sesc SP – Programação Musical Mensal
-
-# ──────────────────────────────────────────────────────────────
-# QUANDO EXECUTAR
-# ──────────────────────────────────────────────────────────────
-on:
-  # Automático: todo dia 25 do mês às 9h (horário de Brasília = 12h UTC)
-  schedule:
-    - cron: "0 12 25 * *"
-
-  # Manual: permite rodar a qualquer momento pelo painel do GitHub
-  workflow_dispatch:
-    inputs:
-      forcar_envio:
-        description: "Enviar e-mail mesmo sem mudanças?"
-        required: false
-        default: "false"
-        type: choice
-        options: ["false", "true"]
-
-# ──────────────────────────────────────────────────────────────
-# JOBS
-# ──────────────────────────────────────────────────────────────
-jobs:
-  extrair-e-notificar:
-    name: Extrair programação e notificar
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    permissions:
-      contents: write   # para fazer commit do hash e histórico
-
-    steps:
-
-      # 1. Baixa o código do repositório
-      - name: 📥 Checkout do repositório
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      # 2. Configura Python
-      - name: 🐍 Configurar Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      # 3. Instala dependências
-      - name: 📦 Instalar dependências
-        run: |
-          pip install --upgrade pip
-          pip install requests pypdf openpyxl
-
-      # 4. Roda o extrator principal
-      - name: 🎵 Extrair programação musical
-        run: |
-          cd ${{ github.workspace }}
-          python scripts/sesc_musica_capital.py
-        env:
-          # Garante que o script não peça input manual
-          PYTHONUNBUFFERED: "1"
-
-      # 5. Lista o arquivo gerado (debug)
-      - name: 📋 Verificar arquivo gerado
-        run: |
-          echo "Arquivos gerados:"
-          ls -lh *.xlsx 2>/dev/null || echo "(nenhum .xlsx na raiz)"
-          ls -lh scripts/*.xlsx 2>/dev/null || echo "(nenhum .xlsx em scripts/)"
-
-      # 6. Move o xlsx para a raiz do projeto (se gerado em scripts/)
-      - name: 📂 Organizar arquivo Excel
-        run: |
-          # Move qualquer xlsx gerado para a raiz do repositório
-          find . -maxdepth 2 -name "sesc_musica_capital_*.xlsx" \
-            ! -path "./historico/*" \
-            -exec mv {} . \; 2>/dev/null || true
-
-      # 7. Compara com versão anterior e envia e-mail
-      - name: 📬 Comparar mudanças e notificar
-        run: |
-          cd ${{ github.workspace }}
-          python scripts/comparar_e_notificar.py
-        env:
-          GMAIL_USER:     ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
-          EMAIL_DESTINO:  ${{ secrets.EMAIL_DESTINO }}
-          FORCAR_ENVIO:   ${{ github.event.inputs.forcar_envio || 'false' }}
-
-      # 8. Faz commit do hash e histórico de volta ao repositório
-      - name: 💾 Salvar histórico no repositório
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add ultimo_hash.json historico/ *.xlsx 2>/dev/null || true
-
-          # Só faz commit se houver mudanças
-          if git diff --staged --quiet; then
-            echo "Nada novo para commitar."
-          else
-            DATA=$(date '+%Y-%m-%d %H:%M')
-            git commit -m "🎵 Programação musical atualizada – $DATA"
-            git push
-          fi
+{
+  "name": "\ud83c\udfb5 Sesc SP \u2013 Programa\u00e7\u00e3o Musical Mensal",
+  "true": {
+    "schedule": [
+      {
+        "cron": "0 12 25 * *"
+      }
+    ],
+    "workflow_dispatch": {
+      "inputs": {
+        "forcar_envio": {
+          "description": "Enviar e-mail mesmo sem mudan\u00e7as?",
+          "required": false,
+          "default": "false",
+          "type": "choice",
+          "options": [
+            "false",
+            "true"
+          ]
+        }
+      }
+    }
+  },
+  "jobs": {
+    "extrair-e-notificar": {
+      "name": "Extrair programa\u00e7\u00e3o e notificar",
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 15,
+      "permissions": {
+        "contents": "write"
+      },
+      "steps": [
+        {
+          "name": "\ud83d\udce5 Checkout do reposit\u00f3rio",
+          "uses": "actions/checkout@v4",
+          "with": {
+            "token": "${{ secrets.GITHUB_TOKEN }}"
+          }
+        },
+        {
+          "name": "\ud83d\udc0d Configurar Python 3.11",
+          "uses": "actions/setup-python@v5",
+          "with": {
+            "python-version": "3.11",
+            "cache": "pip"
+          }
+        },
+        {
+          "name": "\ud83d\udce6 Instalar depend\u00eancias",
+          "run": "pip install --upgrade pip\npip install requests pypdf openpyxl\n"
+        },
+        {
+          "name": "\ud83c\udfb5 Extrair programa\u00e7\u00e3o musical",
+          "run": "cd ${{ github.workspace }}\npython scripts/sesc_musica_capital.py\n",
+          "env": {
+            "PYTHONUNBUFFERED": "1"
+          }
+        },
+        {
+          "name": "\ud83d\udccb Verificar arquivo gerado",
+          "run": "echo \"Arquivos gerados:\"\nls -lh *.xlsx 2>/dev/null || echo \"(nenhum .xlsx na raiz)\"\nls -lh scripts/*.xlsx 2>/dev/null || echo \"(nenhum .xlsx em scripts/)\"\n"
+        },
+        {
+          "name": "\ud83d\udcc2 Organizar arquivo Excel",
+          "run": "# Move qualquer xlsx gerado para a raiz do reposit\u00f3rio\nfind . -maxdepth 2 -name \"sesc_musica_capital_*.xlsx\" \\\n  ! -path \"./historico/*\" \\\n  -exec mv {} . \\; 2>/dev/null || true\n"
+        },
+        {
+          "name": "\ud83d\udcec Comparar mudan\u00e7as e notificar",
+          "run": "cd ${{ github.workspace }}\npython scripts/comparar_e_notificar.py\n",
+          "env": {
+            "GMAIL_USER": "${{ secrets.GMAIL_USER }}",
+            "GMAIL_APP_PASS": "${{ secrets.GMAIL_APP_PASS }}",
+            "EMAIL_DESTINO": "${{ secrets.EMAIL_DESTINO }}",
+            "FORCAR_ENVIO": "${{ github.event.inputs.forcar_envio || 'false' }}"
+          }
+        },
+        {
+          "name": "\ud83d\udcbe Salvar hist\u00f3rico no reposit\u00f3rio",
+          "run": "git config user.name  \"github-actions[bot]\"\ngit config user.email \"github-actions[bot]@users.noreply.github.com\"\n\ngit add ultimo_hash.json historico/ *.xlsx 2>/dev/null || true\n\n# S\u00f3 faz commit se houver mudan\u00e7as\nif git diff --staged --quiet; then\n  echo \"Nada novo para commitar.\"\nelse\n  DATA=$(date '+%Y-%m-%d %H:%M')\n  git commit -m \"\ud83c\udfb5 Programa\u00e7\u00e3o musical atualizada \u2013 $DATA\"\n  git push\nfi\n"
+        }
+      ]
+    }
+  }
+}
