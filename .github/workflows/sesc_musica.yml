@@ -4,6 +4,11 @@ name: Sesc SP - Programacao Musical Mensal
 # QUANDO EXECUTAR
 # ──────────────────────────────────────────────────────────────
 on:
+  push:
+      branches: [ "main" ]
+    schedule:
+      - cron: "0 12 25 * *"
+  workflow_dispatch:
   # Automático: todo dia 25 do mês às 9h (horário de Brasília = 12h UTC)
   schedule:
     - cron: "0 12 25 * *"
