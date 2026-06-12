@@ -1,14 +1,13 @@
-name: Sesc SP - Programacao Musical Mensal
+name: 🎵 Sesc SP – Programação Musical Mensal
 
 # ──────────────────────────────────────────────────────────────
 # QUANDO EXECUTAR
 # ──────────────────────────────────────────────────────────────
 on:
+  # Gatilho temporário para forçar o GitHub a registrar o workflow na aba Actions
   push:
-      branches: [ "main" ]
-    schedule:
-      - cron: "0 12 25 * *"
-  workflow_dispatch:
+    branches: [ "main" ]
+
   # Automático: todo dia 25 do mês às 9h (horário de Brasília = 12h UTC)
   schedule:
     - cron: "0 12 25 * *"
@@ -95,15 +94,4 @@ jobs:
       - name: 💾 Salvar histórico no repositório
         run: |
           git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add ultimo_hash.json historico/ *.xlsx 2>/dev/null || true
-
-          # Só faz commit se houver mudanças
-          if git diff --staged --quiet; then
-            echo "Nada novo para commitar."
-          else
-            DATA=$(date '+%Y-%m-%d %H:%M')
-            git commit -m "🎵 Programação musical atualizada – $DATA"
-            git push
-          fi
+          git config user.email "github-actions[bot]@users.noreply
