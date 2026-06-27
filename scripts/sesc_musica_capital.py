@@ -11,6 +11,7 @@ Dependências:
 import re
 import sys
 import io
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -442,16 +443,34 @@ def main():
             print("❌ Falha ao baixar o PDF.")
 
     if not texto.strip():
-        print("\n⚠️  PDF não obtido automaticamente.")
-        print("   Baixe o PDF 'Em Cartaz' em sescsp.org.br/programacao")
-        caminho_manual = input("   Informe o caminho do PDF: ").strip().strip('"')
-        if not caminho_manual:
+        # Verifica se há PDF local especificado via variável de ambiente
+        # (útil para GitHub Actions: PDF_LOCAL_PATH=/caminho/do/arquivo.pdf)
+        caminho_env = os.environ.get("PDF_LOCAL_PATH", "").strip().strip('"')
+        if caminho_env and Path(caminho_env).exists():
+            print(f"📄 Lendo PDF local (PDF_LOCAL_PATH): {caminho_env}")
+            texto = ler_pdf_local(caminho_env)
+
+    if not texto.strip():
+        # Modo interativo: só pede input se estiver num terminal real
+        if sys.stdin.isatty():
+            print("\n⚠️  PDF não obtido automaticamente.")
+            print("   Baixe o PDF 'Em Cartaz' em sescsp.org.br/programacao")
+            caminho_manual = input("   Informe o caminho do PDF: ").strip().strip('"')
+            if caminho_manual and Path(caminho_manual).exists():
+                print("📄 Lendo PDF local...")
+                texto = ler_pdf_local(caminho_manual)
+            else:
+                print("❌ Caminho inválido ou não informado.")
+                sys.exit(1)
+        else:
+            # Ambiente CI/automação: falha com mensagem clara
+            print("\n❌ PDF não encontrado automaticamente e não há terminal para entrada manual.")
+            print("   Verifique se a URL do PDF está correta para o mês atual.")
+            print(f"   Mês buscado: {mes_ref}")
+            print("   URLs testadas: veja o log acima (linhas com 🔎)")
+            print("   Dica: o PDF de julho costuma ser publicado na última semana de junho.")
+            print("   Se ainda não foi publicado, aguarde e re-execute o workflow.")
             sys.exit(1)
-        if not Path(caminho_manual).exists():
-            print(f"❌ Arquivo não encontrado: {caminho_manual}")
-            sys.exit(1)
-        print("📄 Lendo PDF local...")
-        texto = ler_pdf_local(caminho_manual)
 
     if not texto.strip():
         print("❌ Não foi possível extrair texto do PDF.")
