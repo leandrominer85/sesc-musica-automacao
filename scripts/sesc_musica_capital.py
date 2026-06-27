@@ -50,18 +50,16 @@ UNIDADES_CAPITAL = [
     "BRÁS","BRAS",
 ]
 
-# Seções não-musicais — ao aparecerem como cabeçalho, param a coleta
 CORTE_SECAO = [
     "TEATRO","DANÇA","CIRCO","EXPOSIÇÕES","CINEMA","CRIANÇAS","JOVENS",
     "PESSOAS IDOSAS","ESPORTE","TURISMO SOCIAL","TRABALHO E","MEIO AMBIENTE",
     "DIREITOS HUMANOS","TECNOLOGIAS","SAÚDE","ALIMENTAÇÃO","LITERATURA",
-    "CENTRO DE PESQUISA","LOJAS SESC","SHOWS E ESPETÁCULOS","INGRESSOS",
+    "CENTRO DE PESQUISA","LOJAS SESC","INGRESSOS",
 ]
 
-# Títulos de subsessão que devem ser ignorados (não são artistas)
 IGNORAR_LINHAS = {
-    "SHOWS E ESPETÁCULOS","INGRESSOS","EM CARTAZ","JUNHO 2026","JULHO 2026",
-    "AGOSTO 2026","PROGRAMAÇÃO","EVENTOS","MÚSICA","MUSICA",
+    "SHOWS E ESPETÁCULOS","INGRESSOS","EM CARTAZ","PROGRAMAÇÃO",
+    "EVENTOS","MÚSICA","MUSICA",
 }
 
 PREPOSICOES = {
@@ -154,8 +152,11 @@ def baixar_pdf(url):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PASSO 2 – EXTRAIR TEXTO DO PDF
+# PASSO 2 – EXTRAIR TEXTO DO PDF (sem separação de colunas)
 # ─────────────────────────────────────────────────────────────────────────────
+# Estratégia: extrair palavras com coordenadas XY e reconstruir por linha,
+# mas SEM separar colunas — deixamos o parser lidar com a mistura.
+# A separação de colunas criava blocos desconexos que quebravam o contexto.
 
 def _corrigir_espelhado(texto: str) -> str:
     """Corrige palavras extraídas invertidas por fontes não-padrão."""
@@ -173,53 +174,37 @@ def _corrigir_espelhado(texto: str) -> str:
     return "\n".join(linhas)
 
 
-def _reconstruir_por_coords(words: list) -> str:
-    """Reconstrói linhas a partir de palavras com coordenadas XY."""
-    if not words:
-        return ""
-    linhas: dict[int, list] = {}
-    for w in words:
-        texto_w = w.get("text", "").strip()
-        if not texto_w:
-            continue
-        y = round(float(w.get("top", 0)) / 3) * 3
-        linhas.setdefault(y, []).append((float(w.get("x0", 0)), texto_w))
-    resultado = []
-    for y in sorted(linhas):
-        resultado.append(" ".join(p[1] for p in sorted(linhas[y])))
-    return "\n".join(resultado)
-
-
 def extrair_texto(conteudo: bytes) -> str:
     """
-    Extrai texto separando as 2 colunas do PDF por coordenada X,
-    garantindo que conteúdo de seções diferentes não se misture.
+    Extrai texto página por página com pdfplumber.
+    Reconstrói cada linha agrupando palavras pelo mesmo Y,
+    ordenadas por X — sem dividir em colunas.
+    O parser cuida de ignorar conteúdo de outras seções.
     """
     partes = []
     with pdfplumber.open(io.BytesIO(conteudo)) as pdf:
-        for num_pag, page in enumerate(pdf.pages):
-            largura = float(page.width)
-            words = page.extract_words(x_tolerance=3, y_tolerance=3,
-                                       keep_blank_chars=False, use_text_flow=False)
+        for page in pdf.pages:
+            words = page.extract_words(
+                x_tolerance=3, y_tolerance=3,
+                keep_blank_chars=False, use_text_flow=False,
+            )
             if not words:
                 continue
 
-            # Detecta ponto de corte entre colunas (maior gap horizontal)
-            xs = sorted(set(round(float(w["x0"])) for w in words))
-            corte = largura / 2
-            zona = [x for x in xs if largura * 0.25 <= x <= largura * 0.75]
-            if len(zona) > 1:
-                gaps = [(zona[i+1]-zona[i], zona[i]) for i in range(len(zona)-1)]
-                maior = max(gaps, key=lambda g: g[0])
-                corte = maior[1] + maior[0] / 2
+            # Agrupa por Y (tolerância de 3 pt) e ordena por X
+            linhas: dict[int, list] = {}
+            for w in words:
+                y = round(float(w["top"]) / 3) * 3
+                linhas.setdefault(y, []).append(
+                    (float(w["x0"]), w["text"])
+                )
 
-            esq = _reconstruir_por_coords([w for w in words if float(w["x0"]) < corte])
-            dir_ = _reconstruir_por_coords([w for w in words if float(w["x0"]) >= corte])
+            for y in sorted(linhas):
+                linha = " ".join(t for _, t in sorted(linhas[y]))
+                if linha.strip():
+                    partes.append(linha)
 
-            if esq.strip():
-                partes.append(f"[P{num_pag+1}E]\n{esq}")
-            if dir_.strip():
-                partes.append(f"[P{num_pag+1}D]\n{dir_}")
+            partes.append("")  # linha em branco entre páginas
 
     return _corrigir_espelhado("\n".join(partes))
 
@@ -236,48 +221,46 @@ def ler_pdf_local(caminho: str) -> str:
 def _norm(t: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
-def _sem_marcador(linha: str) -> str:
-    """Remove marcadores de página/coluna [P1E], [P2D] etc."""
-    return re.sub(r'^\[P\d+[ED]\]\s*', '', linha).strip()
 
 def _eh_unidade_capital(ls: str) -> bool:
     lu = re.sub(r'\s*\(.*?\)', '', ls.upper()).strip()
-    # Garante que é EXATAMENTE uma unidade, não "CAMPO LIMPO torcer" etc.
-    return any(u == lu or lu.startswith(u) and (len(lu) == len(u) or lu[len(u)] in ' (')
-               for u in UNIDADES_CAPITAL)
+    # Match exato ou com qualificador entre parênteses
+    for u in UNIDADES_CAPITAL:
+        if lu == u:
+            return True
+        if lu.startswith(u) and len(lu) > len(u) and lu[len(u)] in ' (':
+            return True
+    return False
+
 
 def _eh_linha_unidade(ls: str) -> bool:
-    if not (3 <= len(ls) <= 50):
+    if not (3 <= len(ls) <= 55):
         return False
     base = re.sub(r'\s*\(.*?\)', '', ls).strip()
     if not base or base != base.upper() or re.search(r'\d', base):
         return False
     return _eh_unidade_capital(ls)
 
+
 def _eh_secao_corte(ls: str) -> bool:
     lu = ls.upper().strip()
     return any(lu == s or lu.startswith(s + " ") for s in CORTE_SECAO)
 
+
 def _eh_continuacao_metadado(ls: str) -> bool:
-    """
-    Detecta linha que é continuação de metadado do evento anterior
-    (preço, horário, classificação soltos), não um novo título.
-    """
+    """Linha de preço/hora/classif solta — não é novo título."""
     if not ls:
         return False
-    # Começa com R$
     if re.match(r'^R\$\s*\d', ls):
         return True
-    # Começa com horário (HHh)
     if re.match(r'^\d{1,2}h', ls):
         return True
-    # Começa com dia da semana
     if re.match(DIAS_SEMANA, ls, re.I):
         return True
-    # É só classificação e/ou GRÁTIS
     if re.match(r'^(AL|A\d{1,2}|Livre|Todas as|GRÁTIS)', ls, re.I):
         return True
     return False
+
 
 def _extrair_preco(texto: str) -> str:
     vals = re.findall(r'R\$\s*\d+', texto)
@@ -287,16 +270,18 @@ def _extrair_preco(texto: str) -> str:
         return "GRÁTIS"
     return ""
 
+
 def _extrair_hora(texto: str) -> str:
     m = re.search(r'(\d{1,2}h\d{0,2}(?:\s*às\s*\d{1,2}h\d{0,2})?)', texto, re.I)
     return m.group(1) if m else ""
+
 
 def _extrair_classif(texto: str) -> str:
     m = re.search(r'\b(A(?:L|\d{1,2})|Livre|Todas as idades)\b', texto, re.I)
     return m.group(1) if m else ""
 
+
 def _parse_linha_data(ls: str) -> dict | None:
-    """Detecta linha que contém data de evento."""
     m = re.match(
         r'(?:Dia[s]?\s+|De\s+)?'
         r'(\d{1,2}(?:\s*(?:e|a|,)\s*\d{1,2})?'
@@ -314,8 +299,8 @@ def _parse_linha_data(ls: str) -> dict | None:
         "Horário":       _extrair_hora(resto),
         "Preço":         _extrair_preco(resto),
         "Classificação": _extrair_classif(resto),
-        "_resto":        resto,
     }
+
 
 def _titulo_valido(ls: str) -> bool:
     if not ls or len(ls) < 3:
@@ -332,17 +317,15 @@ def _titulo_valido(ls: str) -> bool:
         return False
     if re.match(r'Dia[s]?\s+\d|De\s+\d|\d{1,2}/\d{1,2}', ls, re.I):
         return False
-    if re.match(r'^\[P\d+', ls):
-        return False
     if _eh_continuacao_metadado(ls):
         return False
     return True
 
+
 def _limpa_titulo(t: str) -> str:
     t = re.sub(r'\bFoto:.*', '', t, flags=re.I)
     t = re.sub(r'\s*\|.*$', '', t)
-    t = re.sub(r'^\[P\d+[ED]\]\s*', '', t)
-    # Remove texto duplicado: "Brasa: Uma Dança Brasa: Uma Dança" → "Brasa: Uma Dança"
+    # Remove duplicação "X X" → "X"
     words = t.split()
     meio = len(words) // 2
     if meio > 2 and words[:meio] == words[meio:]:
@@ -351,28 +334,33 @@ def _limpa_titulo(t: str) -> str:
 
 
 def parse_musica(texto: str) -> list[dict]:
-    # Localiza seção MÚSICA
+    # Localiza início da seção MÚSICA
     idx = -1
     for pat in [r'\bMÚSICA\b', r'\bMUSICA\b']:
         for m in re.finditer(pat, texto, re.IGNORECASE):
             if idx == -1 or m.start() < idx:
                 idx = m.start()
+
     if idx == -1:
-        print("  ⚠️  Seção 'MÚSICA' não encontrada.")
-        print(texto[:500])
+        print("  ⚠️  'MÚSICA' não encontrada no texto.")
+        print("  Amostra do texto extraído:")
+        print(texto[:600])
         return []
 
-    # Estado do parser
+    print(f"  ✅ Seção MÚSICA encontrada na posição {idx}")
+
+    # Estado
     eventos       = []
     unidade_atual = None
-    ev_aberto     = None   # evento sendo construído (pode ter data sem preço ainda)
+    ev_aberto     = None
     titulo_atual  = ""
     tem_desc      = False
     em_musica     = True
+    unidades_vistas = []
 
-    def _fechar_evento():
+    def _fechar():
         nonlocal ev_aberto, titulo_atual, tem_desc
-        if ev_aberto and titulo_atual:
+        if ev_aberto is not None and titulo_atual:
             ev_aberto["Artista / Título"] = _limpa_titulo(titulo_atual)
             ev_aberto["Unidade"]          = f"Sesc {unidade_atual.title()}"
             eventos.append(ev_aberto)
@@ -381,23 +369,17 @@ def parse_musica(texto: str) -> list[dict]:
         tem_desc     = False
 
     for linha_raw in texto[idx:].split("\n"):
-        linha  = _norm(linha_raw)
-        ls     = _sem_marcador(linha)
-
+        ls = _norm(linha_raw)
         if not ls:
             tem_desc = False
             continue
 
-        # Marcador de coluna → reseta contexto de seção mas não de unidade
-        if re.match(r'^\[P\d+[ED]\]$', linha):
-            continue
-
-        # Seção não-musical → para de coletar desta coluna
+        # Seção não-musical → desativa coleta
         if _eh_secao_corte(ls):
             em_musica = False
             continue
 
-        # Volta a coletar se encontrar cabeçalho MÚSICA novamente (outra coluna)
+        # Reabre coleta se aparecer MÚSICA novamente
         if re.match(r'^(MÚSICA|MUSICA)$', ls, re.I):
             em_musica = True
             continue
@@ -405,73 +387,57 @@ def parse_musica(texto: str) -> list[dict]:
         if not em_musica:
             continue
 
-        # ── Linha de UNIDADE ────────────────────────────────────────────────
+        # Linha ignorada (cabeçalhos internos)
+        if ls.upper() in IGNORAR_LINHAS:
+            continue
+
+        # Linha de UNIDADE
         if _eh_linha_unidade(ls):
-            _fechar_evento()
+            _fechar()
             unidade_atual = ls
+            unidades_vistas.append(ls)
             continue
 
         if not unidade_atual:
             continue
 
-        # ── Linha ignorada (cabeçalhos internos) ────────────────────────────
-        if ls.upper() in IGNORAR_LINHAS:
-            continue
-
-        # ── Continuação de metadado (preço/hora soltos após data) ───────────
+        # Continuação de metadado (preço/hora soltos)
         if _eh_continuacao_metadado(ls):
             if ev_aberto is not None:
-                # Enriquece o evento aberto com dados faltantes
                 if not ev_aberto.get("Horário"):
                     h = _extrair_hora(ls)
-                    if h:
-                        ev_aberto["Horário"] = h
+                    if h: ev_aberto["Horário"] = h
                 if not ev_aberto.get("Preço"):
                     p = _extrair_preco(ls)
-                    if p:
-                        ev_aberto["Preço"] = p
+                    if p: ev_aberto["Preço"] = p
                 if not ev_aberto.get("Classificação"):
                     c = _extrair_classif(ls)
-                    if c:
-                        ev_aberto["Classificação"] = c
-            # Se não há evento aberto, ignora essa linha
+                    if c: ev_aberto["Classificação"] = c
             continue
 
-        # ── Linha de DATA ───────────────────────────────────────────────────
+        # Linha de DATA
         ev_data = _parse_linha_data(ls)
         if ev_data:
-            # Fecha evento anterior se havia um aberto
             if ev_aberto is not None:
-                _fechar_evento()
-            # Abre novo evento com os dados da linha de data
-            ev_aberto = {
-                "Data":          ev_data["Data"],
-                "Horário":       ev_data["Horário"],
-                "Preço":         ev_data["Preço"],
-                "Classificação": ev_data["Classificação"],
-            }
-            # Título já deve ter sido capturado antes
-            if not titulo_atual:
-                titulo_atual = ""
-            tem_desc = False
+                _fechar()
+            ev_aberto = dict(ev_data)
+            tem_desc  = False
             continue
 
-        # ── Título ou descrição ─────────────────────────────────────────────
+        # Título ou descrição
         if not tem_desc:
             if _titulo_valido(ls):
-                # Novo título: fecha evento anterior se aberto
                 if ev_aberto is not None:
-                    _fechar_evento()
+                    _fechar()
                 titulo_atual = _limpa_titulo(ls)
                 tem_desc     = True
-        # Linhas subsequentes são descrição — não sobrescreve titulo_atual
 
-    # Fecha último evento pendente
-    _fechar_evento()
+    _fechar()
 
-    # Remove duplicatas exatas (mesmo artista + unidade + data)
-    vistos = set()
-    unicos = []
+    print(f"  Unidades detectadas: {unidades_vistas}")
+
+    # Remove duplicatas
+    vistos, unicos = set(), []
     for ev in eventos:
         chave = (ev.get("Artista / Título",""), ev.get("Unidade",""), ev.get("Data",""))
         if chave not in vistos:
@@ -597,13 +563,22 @@ def main():
     if not texto.strip():
         print("❌ Não foi possível extrair texto."); sys.exit(1)
 
-    print("🎵 Parseando programação musical...")
+    # Diagnóstico: mostra contexto ao redor de MÚSICA no texto
+    idx_musica = texto.find("MÚSICA")
+    if idx_musica == -1:
+        idx_musica = texto.find("MUSICA")
+    if idx_musica >= 0:
+        print(f"\n📋 Contexto da seção MÚSICA (chars {idx_musica}-{idx_musica+300}):")
+        print(texto[idx_musica:idx_musica+300])
+        print("...")
+
+    print("\n🎵 Parseando programação musical...")
     eventos = parse_musica(texto)
 
     if not eventos:
         print("\n⚠️  Nenhum evento encontrado.")
-        idx = max(texto.find("MÚSICA"), texto.find("MUSICA"), 0)
-        print(texto[idx:idx+800])
+        print("Amostra completa do texto extraído (primeiros 2000 chars):")
+        print(texto[:2000])
         sys.exit(1)
 
     eventos.sort(key=lambda x: (x.get("Unidade",""), x.get("Data","")))
