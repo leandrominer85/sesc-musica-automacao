@@ -4,17 +4,8 @@ sesc_musica_capital.py
 Extrai programação de MÚSICA das unidades da CAPITAL do Sesc SP
 e salva como planilha Excel (.xlsx).
 
-ESTRATÉGIA:
-  1. Baixa o PDF "Em Cartaz" do mês
-  2. Extrai texto com pdfplumber (respeita colunas) ou pypdf layout mode
-  3. Parseia a seção MÚSICA filtrando unidades da capital
-  4. Gera o .xlsx formatado
-
-Dependências (instalar apenas uma vez):
+Dependências:
     pip install requests pdfplumber openpyxl
-
-Uso:
-    python sesc_musica_capital.py
 """
 
 import re
@@ -23,12 +14,11 @@ import io
 from datetime import datetime
 from pathlib import Path
 
-# ── Verifica dependências ──────────────────────────────────────────────────
 def _req(pkg, install=None):
     try:
         __import__(pkg)
     except ImportError:
-        print(f"❌ '{pkg}' não encontrado. Instale com:\n   pip install {install or pkg}")
+        print(f"❌ '{pkg}' não encontrado.\n   pip install {install or pkg}")
         sys.exit(1)
 
 _req("requests")
@@ -46,9 +36,9 @@ from openpyxl.utils import get_column_letter
 # ─────────────────────────────────────────────────────────────────────────────
 
 MESES_PT = {
-    1:"janeiro", 2:"fevereiro", 3:"março",    4:"abril",
-    5:"maio",    6:"junho",     7:"julho",     8:"agosto",
-    9:"setembro",10:"outubro",  11:"novembro", 12:"dezembro",
+    1:"janeiro", 2:"fevereiro", 3:"março",     4:"abril",
+    5:"maio",    6:"junho",     7:"julho",      8:"agosto",
+    9:"setembro",10:"outubro",  11:"novembro",  12:"dezembro",
 }
 
 UNIDADES_CAPITAL = [
@@ -56,10 +46,10 @@ UNIDADES_CAPITAL = [
     "CAMPO LIMPO","CASA VERDE","CONSOLAÇÃO","INTERLAGOS","IPIRANGA",
     "ITAQUERA","PINHEIROS","POMPEIA","SANTANA","SANTO AMARO","SÃO BENTO",
     "SÃO JOÃO CLÍMACO","VILA MARIANA","CARMO","PARQUE DOM PEDRO",
-    "BRAS","BRÁS",
+    "BRÁS","BRAS",
 ]
 
-# Seções não-musicais — interrompem a coleta
+# Seções não-musicais — interrompem a coleta ao aparecerem como cabeçalho
 CORTE_SECAO = [
     "TEATRO","DANÇA","CIRCO","EXPOSIÇÕES","CINEMA","CRIANÇAS","JOVENS",
     "PESSOAS IDOSAS","ESPORTE","TURISMO SOCIAL","TRABALHO E","MEIO AMBIENTE",
@@ -67,24 +57,22 @@ CORTE_SECAO = [
     "CENTRO DE PESQUISA","LOJAS SESC",
 ]
 
-# Palavras que indicam linha de crédito/participação, não título
-PREFIXOS_DESCRICAO = (
-    "part.","com ","curadoria","mediação","apresentação de","realização",
-    "intervenção","produção","direção","texto ","arranjo","criação ",
-)
-
-# Preposições/artigos que nunca iniciam um título de artista
 PREPOSICOES = {
     "a","ao","à","às","de","do","da","dos","das","em","no","na","nos","nas",
     "por","para","pelo","pela","pelos","pelas","com","entre","e","ou",
-    "que","se","sua","seu","seus","suas","um","uma",
+    "que","se","sua","seu","seus","suas","um","uma","os","as","o",
 }
 
-# Estilos Excel
-COR_VERMELHO  = "C00000"
-COR_VERM_ESC  = "8B0000"
-COR_BRANCO    = "FFFFFF"
-COR_CINZA     = "F5F5F5"
+PREFIXOS_DESC = (
+    "part.","com ","curadoria","mediação","apresentação de","realização",
+    "intervenção","produção","direção","texto ","arranjo","criação ",
+    "foto:","#",
+)
+
+COR_VERMELHO = "C00000"
+COR_VERM_ESC = "8B0000"
+COR_BRANCO   = "FFFFFF"
+COR_CINZA    = "F5F5F5"
 
 COLUNAS  = ["Artista / Título", "Unidade", "Data", "Horário", "Preço", "Classificação"]
 LARGURAS = [42, 24, 26, 12, 22, 16]
@@ -104,24 +92,25 @@ HEADERS = {
 def _pdf_existe(url):
     try:
         r = requests.head(url, headers=HEADERS, timeout=10, allow_redirects=True)
-        return r.status_code == 200 and "pdf" in r.headers.get("Content-Type","").lower()
+        ct = r.headers.get("Content-Type", "").lower()
+        return r.status_code == 200 and "pdf" in ct
     except Exception:
         return False
 
 
 def descobrir_url_pdf(ano, mes):
-    m = MESES_PT[mes]
-    mes_pub  = mes - 1 if mes > 1 else 12
-    ano_pub  = ano if mes > 1 else ano - 1
+    m       = MESES_PT[mes]
+    mes_pub = mes - 1 if mes > 1 else 12
+    ano_pub = ano if mes > 1 else ano - 1
 
     candidatos = [
-        # Padrão 2026 confirmado
         f"https://www.sescsp.org.br/wp-content/uploads/{ano_pub}/{mes_pub:02d}/V11_Em-Cartaz_{ano}_{m}_15-bx.pdf",
         f"https://www.sescsp.org.br/wp-content/uploads/{ano_pub}/{mes_pub:02d}/V12_Em-Cartaz_{ano}_{m}_15-bx.pdf",
         f"https://www.sescsp.org.br/wp-content/uploads/{ano_pub}/{mes_pub:02d}/V10_Em-Cartaz_{ano}_{m}_15-bx.pdf",
         f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mes:02d}/V11_Em-Cartaz_{ano}_{m}_15-bx.pdf",
         f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mes:02d}/Em-Cartaz_{ano}_{m}.pdf",
         f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mes:02d}/Em-Cartaz-{m}-{ano}.pdf",
+        f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mes:02d}/em-cartaz-{m}-{ano}.pdf",
     ]
     for url in candidatos:
         print(f"  🔎 {url.split('uploads/')[-1]}")
@@ -132,16 +121,16 @@ def descobrir_url_pdf(ano, mes):
 
 def buscar_pdf_no_html(ano, mes):
     m = MESES_PT[mes]
-    for url_busca in ["https://www.sescsp.org.br/programacao/", "https://www.sescsp.org.br/"]:
+    for base in ["https://www.sescsp.org.br/programacao/", "https://www.sescsp.org.br/"]:
         try:
-            r = requests.get(url_busca, headers=HEADERS, timeout=15)
+            r = requests.get(base, headers=HEADERS, timeout=15)
             pdfs = re.findall(
                 r'https://www\.sescsp\.org\.br/wp-content/uploads/[^\s"\'<>]*'
                 r'[Ee]m[- _][Cc]artaz[^\s"\'<>]*\.pdf', r.text
             )
-            for pdf_url in pdfs:
-                if m in pdf_url.lower() or str(ano) in pdf_url:
-                    return pdf_url
+            for u in pdfs:
+                if m in u.lower() or str(ano) in u:
+                    return u
         except Exception:
             pass
     return None
@@ -152,66 +141,26 @@ def baixar_pdf(url):
         r = requests.get(url, headers=HEADERS, timeout=45)
         return r.content if r.status_code == 200 else None
     except Exception as e:
-        print(f"  ❌ Erro ao baixar PDF: {e}")
+        print(f"  ❌ {e}")
         return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PASSO 2 – EXTRAIR TEXTO COM pdfplumber (respeita colunas)
+# PASSO 2 – EXTRAIR TEXTO DO PDF
 # ─────────────────────────────────────────────────────────────────────────────
 
-def extrair_texto_pdfplumber(conteudo: bytes) -> str:
+def extrair_texto(conteudo: bytes) -> str:
     """
-    Usa pdfplumber para extrair texto respeitando o layout de colunas do PDF.
-    Extrai palavras com coordenadas e reconstrói o texto por coluna e posição.
+    Extrai texto página por página com pdfplumber (sem crop de colunas).
+    Usa extract_text() simples que preserva a ordem de leitura natural do PDF.
     """
     partes = []
     with pdfplumber.open(io.BytesIO(conteudo)) as pdf:
         for page in pdf.pages:
-            largura = page.width
-            meio    = largura / 2
-
-            # Divide a página em coluna esquerda e direita
-            col_esq = page.crop((0,    0, meio,    page.height))
-            col_dir = page.crop((meio, 0, largura, page.height))
-
-            txt_esq = col_esq.extract_text(layout=True) or ""
-            txt_dir = col_dir.extract_text(layout=True) or ""
-
-            # Junta as duas colunas com separador claro
-            if txt_esq.strip():
-                partes.append(txt_esq)
-            if txt_dir.strip():
-                partes.append(txt_dir)
-
-    return "\n".join(partes)
-
-
-def extrair_texto_pypdf_layout(conteudo: bytes) -> str:
-    """Fallback: pypdf com extraction_mode=layout (pypdf >= 4.0)."""
-    try:
-        from pypdf import PdfReader
-        reader = PdfReader(io.BytesIO(conteudo))
-        partes = []
-        for page in reader.pages:
-            try:
-                txt = page.extract_text(extraction_mode="layout")
-            except TypeError:
-                txt = page.extract_text()
-            if txt:
+            txt = page.extract_text()
+            if txt and txt.strip():
                 partes.append(txt)
-        return "\n".join(partes)
-    except ImportError:
-        return ""
-
-
-def extrair_texto(conteudo: bytes) -> str:
-    """Tenta pdfplumber primeiro, fallback para pypdf."""
-    texto = extrair_texto_pdfplumber(conteudo)
-    if not texto.strip():
-        print("  ⚠️  pdfplumber vazio, tentando pypdf...")
-        texto = extrair_texto_pypdf_layout(conteudo)
-    return texto
+    return "\n".join(partes)
 
 
 def ler_pdf_local(caminho: str) -> str:
@@ -228,32 +177,31 @@ def _norm(t: str) -> str:
 
 
 def _eh_unidade_capital(linha: str) -> bool:
-    lu = linha.upper().strip()
-    # Remove qualificador entre parênteses para comparar
-    base = re.sub(r'\s*\(.*?\)', '', lu).strip()
-    return any(u in base for u in UNIDADES_CAPITAL)
+    lu = re.sub(r'\s*\(.*?\)', '', linha.upper()).strip()
+    return any(u in lu for u in UNIDADES_CAPITAL)
 
 
 def _eh_linha_unidade(linha: str) -> bool:
     """
-    Linha de unidade: toda em maiúsculas, sem dígitos, curta.
-    Ex: 'BELENZINHO', 'AVENIDA PAULISTA', 'BELENZINHO (PERIFERIAS: ...)'
+    Linha de unidade Sesc: toda em maiúsculas, sem dígitos, máx 70 chars.
+    Ex: 'BELENZINHO', 'AVENIDA PAULISTA', 'CONSOLAÇÃO'
     """
     ls = linha.strip()
-    if not ls or len(ls) < 3 or len(ls) > 70:
+    if not (3 <= len(ls) <= 70):
         return False
-    base = re.sub(r'\(.*?\)', '', ls).strip()
+    base = re.sub(r'\s*\(.*?\)', '', ls).strip()
     if not base or base != base.upper():
         return False
     if re.search(r'\d', base):
         return False
+    # Deve ser uma unidade conhecida da capital
     return _eh_unidade_capital(ls)
 
 
-def _eh_linha_data(linha: str) -> dict | None:
+def _parse_linha_data(linha: str) -> dict | None:
     """
-    Detecta linha de metadados: 'Dia(s) DD/MM. Dia-da-semana, HHh. Classif R$XX'
-    Retorna dict com data/horário/preço/classificação ou None.
+    Detecta linha de metadados do evento.
+    Padrão: 'Dia DD/MM. Dia-da-semana, HHh. Classif R$XX R$YY'
     """
     m = re.match(
         r'(?:Dia[s]?\s+|De\s+)?'
@@ -269,18 +217,18 @@ def _eh_linha_data(linha: str) -> dict | None:
     data_raw = _norm(m.group(1) + m.group(2))
     resto    = _norm(m.group(3))
 
-    hora_m  = re.search(r'(\d{1,2}h\d{0,2}(?:\s*às\s*\d{1,2}h\d{0,2})?)', resto, re.I)
-    # Preço: captura todos os valores R$ na linha
+    hora_m = re.search(r'(\d{1,2}h\d{0,2}(?:\s*às\s*\d{1,2}h\d{0,2})?)', resto, re.I)
+
+    # Captura múltiplos valores de preço: R$50 R$25 R$15
     preco_vals = re.findall(r'R\$\s*\d+', resto)
-    preco_str  = re.search(r'GRÁTIS', resto, re.I)
     if preco_vals:
-        preco = " ".join(preco_vals)
-    elif preco_str:
+        preco = " / ".join(preco_vals)
+    elif re.search(r'GRÁTIS', resto, re.I):
         preco = "GRÁTIS"
     else:
         preco = ""
 
-    clas_m  = re.search(r'\b(A(?:L|\d{1,2})|Livre|Todas as idades)\b', resto, re.I)
+    clas_m = re.search(r'\b(A(?:L|\d{1,2})|Livre|Todas as idades)\b', resto, re.I)
 
     return {
         "Data":          data_raw,
@@ -290,49 +238,36 @@ def _eh_linha_data(linha: str) -> dict | None:
     }
 
 
-def _eh_titulo_valido(linha: str) -> bool:
-    """
-    Verifica se a linha pode ser um título de artista/show.
-    Descarta fragmentos de descrição.
-    """
+def _titulo_valido(linha: str) -> bool:
+    """Retorna True se a linha pode ser um nome de artista/show."""
     ls = linha.strip()
     if not ls or len(ls) < 3:
         return False
-
-    primeira_palavra = ls.split()[0].lower().rstrip('.,;:')
-
-    # Começa com minúscula → é continuação de frase ou descrição
+    # Começa com minúscula → continuação de frase
     if ls[0].islower():
         return False
-
-    # Começa com preposição/artigo → é continuação
-    if primeira_palavra in PREPOSICOES:
+    # Primeira palavra é preposição/artigo
+    primeira = ls.split()[0].lower().rstrip('.,;:')
+    if primeira in PREPOSICOES:
         return False
-
-    # Começa com prefixo de crédito
-    ls_lower = ls.lower()
-    if any(ls_lower.startswith(p) for p in PREFIXOS_DESCRICAO):
+    # Prefixo de crédito
+    ls_low = ls.lower()
+    if any(ls_low.startswith(p) for p in PREFIXOS_DESC):
         return False
-
-    # É linha de data/hora (já tratada separadamente)
+    # É linha de data
     if re.match(r'Dia[s]?\s+\d|De\s+\d|\d{1,2}/\d{1,2}', ls, re.I):
         return False
-
-    # Foto ou crédito de imagem
-    if re.match(r'Foto:', ls, re.I):
-        return False
-
     return True
 
 
 def _limpa_titulo(t: str) -> str:
     t = re.sub(r'\bFoto:.*', '', t, flags=re.I)
-    t = re.sub(r'\s*\|\s*.*$', '', t)  # remove tudo após " | "
+    t = re.sub(r'\s*\|\s*.*$', '', t)
     return _norm(t)[:90]
 
 
 def parse_musica(texto: str) -> list[dict]:
-    # ── 1. Isola seção MÚSICA ────────────────────────────────────────────────
+    # ── 1. Localiza início da seção MÚSICA ───────────────────────────────────
     idx = -1
     for pat in [r'\bMÚSICA\b', r'\bMUSICA\b']:
         m = re.search(pat, texto, re.IGNORECASE)
@@ -343,63 +278,61 @@ def parse_musica(texto: str) -> list[dict]:
         print("  ⚠️  Seção 'MÚSICA' não encontrada no PDF.")
         return []
 
-    texto = texto[idx:]
+    secao_musica = texto[idx:]
 
-    # ── 2. Corta na próxima seção não-musical ────────────────────────────────
+    # ── 2. Corta ao encontrar próxima seção não-musical ──────────────────────
+    corte_idx = len(secao_musica)
     for secao in CORTE_SECAO:
-        c = re.search(rf'(?:^|\n)\s*{re.escape(secao)}\s*(?:\n|$)', texto, re.IGNORECASE)
-        if c and c.start() > 200:
-            texto = texto[:c.start()]
-            break
+        # Busca a seção como linha isolada (cabeçalho)
+        c = re.search(
+            rf'(?:^|\n)[ \t]*{re.escape(secao)}[ \t]*(?:\n|$)',
+            secao_musica, re.IGNORECASE
+        )
+        if c and c.start() > 100 and c.start() < corte_idx:
+            corte_idx = c.start()
 
-    # ── 3. Percorre linha a linha ────────────────────────────────────────────
+    secao_musica = secao_musica[:corte_idx]
+
+    # ── 3. Parse linha a linha ───────────────────────────────────────────────
     eventos       = []
     unidade_atual = None
     titulo_atual  = ""
-    descricao     = False   # flag: já passamos pela 1ª linha (título) do bloco
+    tem_descricao = False   # True depois de registrar o título, até encontrar a data
 
-    for linha_raw in texto.split("\n"):
+    for linha_raw in secao_musica.split("\n"):
         linha = _norm(linha_raw)
         if not linha:
-            # Linha em branco: reseta flag de descrição mas mantém título
-            descricao = False
+            tem_descricao = False
             continue
 
-        # ── Detecta linha de unidade ─────────────────────────────────────
+        # Detecta cabeçalho de unidade
         if _eh_linha_unidade(linha):
-            if unidade_atual and titulo_atual:
-                pass  # título sem data: descarta silenciosamente
             unidade_atual = linha
             titulo_atual  = ""
-            descricao     = False
+            tem_descricao = False
             continue
 
         if not unidade_atual:
             continue
 
-        # ── Detecta linha de data/metadados ──────────────────────────────
-        ev = _eh_linha_data(linha)
+        # Detecta linha de data/metadados → fecha o evento
+        ev = _parse_linha_data(linha)
         if ev:
             if titulo_atual:
                 ev["Artista / Título"] = _limpa_titulo(titulo_atual)
                 ev["Unidade"]          = f"Sesc {unidade_atual.title()}"
                 eventos.append(ev)
-            titulo_atual = ""
-            descricao    = False
+            titulo_atual  = ""
+            tem_descricao = False
             continue
 
-        # ── Detecta título ou descrição ───────────────────────────────────
-        if not descricao:
-            # Primeira linha não-vazia após unidade ou após linha de data:
-            # deve ser o TÍTULO do artista
-            if _eh_titulo_valido(linha):
-                titulo_atual = _limpa_titulo(linha)
-                descricao    = True
-            # Se não é válido como título, ignora e espera próxima linha
-        else:
-            # Já temos título; esta linha é descrição → ignora
-            # (não sobrescreve titulo_atual com fragmento de descrição)
-            pass
+        # Linha de título ou descrição
+        if not tem_descricao:
+            # Primeira linha após unidade ou após evento fechado: deve ser título
+            if _titulo_valido(linha):
+                titulo_atual  = _limpa_titulo(linha)
+                tem_descricao = True
+        # Se já tem título, ignora linhas de descrição (não sobrescreve)
 
     return eventos
 
@@ -414,7 +347,7 @@ def gerar_excel(eventos: list[dict], caminho: Path, mes_ref: str) -> None:
     ws.title = "Programação Musical"
     nc = len(COLUNAS)
 
-    # Linha 1: Título
+    # Linha 1: título
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=nc)
     c = ws.cell(row=1, column=1)
     c.value     = f"Programação Musical – Sesc SP Capital | {mes_ref}"
@@ -423,7 +356,7 @@ def gerar_excel(eventos: list[dict], caminho: Path, mes_ref: str) -> None:
     c.alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 28
 
-    # Linha 2: Subtítulo
+    # Linha 2: subtítulo
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=nc)
     c = ws.cell(row=2, column=1)
     c.value     = (f"Extraído em: {datetime.now().strftime('%d/%m/%Y %H:%M')}"
@@ -432,7 +365,7 @@ def gerar_excel(eventos: list[dict], caminho: Path, mes_ref: str) -> None:
     c.alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[2].height = 16
 
-    # Linha 3: Cabeçalho
+    # Linha 3: cabeçalho
     for ci, nome in enumerate(COLUNAS, 1):
         c = ws.cell(row=3, column=ci, value=nome)
         c.font      = Font(name="Arial", bold=True, size=10, color=COR_BRANCO)
@@ -456,7 +389,6 @@ def gerar_excel(eventos: list[dict], caminho: Path, mes_ref: str) -> None:
             c.border    = borda
         ws.row_dimensions[row].height = 18
 
-    # Rodapé
     lr = len(eventos) + 4
     ws.merge_cells(start_row=lr, start_column=1, end_row=lr, end_column=nc)
     c = ws.cell(row=lr, column=1)
@@ -470,7 +402,6 @@ def gerar_excel(eventos: list[dict], caminho: Path, mes_ref: str) -> None:
         ws.column_dimensions[get_column_letter(ci)].width = larg
     ws.auto_filter.ref = f"A3:{get_column_letter(nc)}3"
     ws.freeze_panes   = "A4"
-
     wb.save(caminho)
 
 
@@ -505,6 +436,8 @@ def main():
         if conteudo:
             print("📄 Extraindo texto com pdfplumber...")
             texto = extrair_texto(conteudo)
+            if texto.strip():
+                print(f"   Texto extraído: {len(texto):,} chars")
         else:
             print("❌ Falha ao baixar o PDF.")
 
@@ -517,6 +450,7 @@ def main():
         if not Path(caminho_manual).exists():
             print(f"❌ Arquivo não encontrado: {caminho_manual}")
             sys.exit(1)
+        print("📄 Lendo PDF local...")
         texto = ler_pdf_local(caminho_manual)
 
     if not texto.strip():
@@ -528,8 +462,11 @@ def main():
 
     if not eventos:
         print("\n⚠️  Nenhum evento encontrado.")
-        print("   Primeiros 500 chars do texto extraído:")
-        print(texto[:500])
+        print("   Trecho do texto extraído para diagnóstico:")
+        idx = texto.find("MÚSICA")
+        if idx == -1:
+            idx = 0
+        print(texto[idx:idx+800])
         sys.exit(1)
 
     eventos.sort(key=lambda x: (x.get("Unidade",""), x.get("Data","")))
@@ -541,7 +478,7 @@ def main():
 
     print(f"\n✅ Concluído!")
     print(f"   Arquivo: {destino}")
-    print(f"   Eventos musicais encontrados: {len(eventos)}")
+    print(f"   Eventos encontrados: {len(eventos)}")
 
 
 if __name__ == "__main__":
