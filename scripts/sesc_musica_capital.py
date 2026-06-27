@@ -50,7 +50,6 @@ UNIDADES_CAPITAL = [
     "BRÁS","BRAS",
 ]
 
-# Seções não-musicais — interrompem a coleta ao aparecerem como cabeçalho
 CORTE_SECAO = [
     "TEATRO","DANÇA","CIRCO","EXPOSIÇÕES","CINEMA","CRIANÇAS","JOVENS",
     "PESSOAS IDOSAS","ESPORTE","TURISMO SOCIAL","TRABALHO E","MEIO AMBIENTE",
@@ -67,7 +66,7 @@ PREPOSICOES = {
 PREFIXOS_DESC = (
     "part.","com ","curadoria","mediação","apresentação de","realização",
     "intervenção","produção","direção","texto ","arranjo","criação ",
-    "foto:","#",
+    "foto:","#","consulte",
 )
 
 COR_VERMELHO = "C00000"
@@ -147,21 +146,128 @@ def baixar_pdf(url):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PASSO 2 – EXTRAIR TEXTO DO PDF
+# PASSO 2 – EXTRAIR TEXTO DO PDF COM SEPARAÇÃO DE COLUNAS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def extrair_texto(conteudo: bytes) -> str:
+def _corrigir_texto_espelhado(texto: str) -> str:
     """
-    Extrai texto página por página com pdfplumber (sem crop de colunas).
-    Usa extract_text() simples que preserva a ordem de leitura natural do PDF.
+    O PDF do Sesc usa fontes com glifos mapeados de forma não-padrão,
+    resultando em palavras extraídas de trás para frente.
+    Esta função detecta e corrige palavras espelhadas.
     """
-    partes = []
+    linhas_corrigidas = []
+    for linha in texto.split("\n"):
+        palavras = linha.split()
+        palavras_corrigidas = []
+        for palavra in palavras:
+            # Detecta palavra espelhada: contém só letras mas está invertida
+            # Heurística: se reverter a palavra produz algo mais legível
+            # (começa com maiúscula válida após reversão)
+            rev = palavra[::-1]
+            # Verifica se a palavra invertida começa com maiúscula e termina
+            # com minúscula (padrão de nome próprio normal)
+            if (len(palavra) >= 3
+                    and palavra[0].islower()
+                    and rev[0].isupper()
+                    and rev[-1].islower()
+                    and palavra.isalpha()):
+                palavras_corrigidas.append(rev)
+            else:
+                palavras_corrigidas.append(palavra)
+        linhas_corrigidas.append(" ".join(palavras_corrigidas))
+    return "\n".join(linhas_corrigidas)
+
+
+def _reconstruir_linhas_por_coordenadas(words: list) -> str:
+    """
+    Reconstrói o texto a partir de palavras com coordenadas XY.
+    Agrupa palavras na mesma linha (mesmo Y) e ordena por X.
+    Isso garante a ordem correta mesmo em PDFs com layout complexo.
+    """
+    if not words:
+        return ""
+
+    # Agrupa por linha (tolerância vertical de 3 pontos)
+    linhas = {}
+    for w in words:
+        texto_w = w.get("text", "").strip()
+        if not texto_w:
+            continue
+        y = round(float(w.get("top", 0)) / 3) * 3  # arredonda para agrupar
+        if y not in linhas:
+            linhas[y] = []
+        linhas[y].append((float(w.get("x0", 0)), texto_w))
+
+    # Ordena linhas por Y crescente, palavras por X crescente
+    resultado = []
+    for y in sorted(linhas.keys()):
+        palavras_linha = sorted(linhas[y], key=lambda p: p[0])
+        resultado.append(" ".join(p[1] for p in palavras_linha))
+
+    return "\n".join(resultado)
+
+
+def extrair_texto_por_coluna(conteudo: bytes) -> str:
+    """
+    Extrai texto separando as duas colunas do PDF pela posição X central.
+    Processa coluna esquerda e direita separadamente para cada página,
+    garantindo que conteúdo de seções diferentes não se misture.
+    """
+    todas_partes = []
+
     with pdfplumber.open(io.BytesIO(conteudo)) as pdf:
-        for page in pdf.pages:
-            txt = page.extract_text()
-            if txt and txt.strip():
-                partes.append(txt)
-    return "\n".join(partes)
+        for num_pag, page in enumerate(pdf.pages):
+            largura  = float(page.width)
+            altura   = float(page.height)
+
+            # Extrai todas as palavras com coordenadas
+            words = page.extract_words(
+                x_tolerance=3,
+                y_tolerance=3,
+                keep_blank_chars=False,
+                use_text_flow=False,
+            )
+
+            if not words:
+                continue
+
+            # Determina o ponto de divisão das colunas
+            # Analisa distribuição de X para encontrar o "vão" central
+            xs = sorted(set(round(float(w["x0"])) for w in words))
+            meio_pagina = largura / 2
+
+            # Encontra o melhor ponto de corte perto do meio
+            # (onde há menos palavras = área de margem/gutter)
+            melhor_corte = meio_pagina
+            if len(xs) > 10:
+                # Janela de busca: 30% a 70% da largura
+                zona_corte = [x for x in xs if largura * 0.30 <= x <= largura * 0.70]
+                if zona_corte:
+                    # Encontra maior gap entre posições X consecutivas
+                    gaps = [(zona_corte[i+1] - zona_corte[i], zona_corte[i])
+                            for i in range(len(zona_corte)-1)]
+                    if gaps:
+                        melhor_corte = max(gaps, key=lambda g: g[0])[1] + \
+                                       max(gaps, key=lambda g: g[0])[0] / 2
+
+            # Separa palavras em coluna esquerda e direita
+            words_esq = [w for w in words if float(w["x0"]) < melhor_corte]
+            words_dir = [w for w in words if float(w["x0"]) >= melhor_corte]
+
+            txt_esq = _reconstruir_linhas_por_coordenadas(words_esq)
+            txt_dir = _reconstruir_linhas_por_coordenadas(words_dir)
+
+            if txt_esq.strip():
+                todas_partes.append(f"[PAG{num_pag+1}_ESQ]\n{txt_esq}")
+            if txt_dir.strip():
+                todas_partes.append(f"[PAG{num_pag+1}_DIR]\n{txt_dir}")
+
+    texto_completo = "\n".join(todas_partes)
+    return _corrigir_texto_espelhado(texto_completo)
+
+
+def extrair_texto(conteudo: bytes) -> str:
+    return extrair_texto_por_coluna(conteudo)
 
 
 def ler_pdf_local(caminho: str) -> str:
@@ -183,11 +289,9 @@ def _eh_unidade_capital(linha: str) -> bool:
 
 
 def _eh_linha_unidade(linha: str) -> bool:
-    """
-    Linha de unidade Sesc: toda em maiúsculas, sem dígitos, máx 70 chars.
-    Ex: 'BELENZINHO', 'AVENIDA PAULISTA', 'CONSOLAÇÃO'
-    """
     ls = linha.strip()
+    # Remove marcador de página/coluna
+    ls = re.sub(r'^\[PAG\d+_(ESQ|DIR)\]\s*', '', ls)
     if not (3 <= len(ls) <= 70):
         return False
     base = re.sub(r'\s*\(.*?\)', '', ls).strip()
@@ -195,15 +299,10 @@ def _eh_linha_unidade(linha: str) -> bool:
         return False
     if re.search(r'\d', base):
         return False
-    # Deve ser uma unidade conhecida da capital
     return _eh_unidade_capital(ls)
 
 
 def _parse_linha_data(linha: str) -> dict | None:
-    """
-    Detecta linha de metadados do evento.
-    Padrão: 'Dia DD/MM. Dia-da-semana, HHh. Classif R$XX R$YY'
-    """
     m = re.match(
         r'(?:Dia[s]?\s+|De\s+)?'
         r'(\d{1,2}(?:\s*(?:e|a|,)\s*\d{1,2})?'
@@ -220,7 +319,6 @@ def _parse_linha_data(linha: str) -> dict | None:
 
     hora_m = re.search(r'(\d{1,2}h\d{0,2}(?:\s*às\s*\d{1,2}h\d{0,2})?)', resto, re.I)
 
-    # Captura múltiplos valores de preço: R$50 R$25 R$15
     preco_vals = re.findall(r'R\$\s*\d+', resto)
     if preco_vals:
         preco = " / ".join(preco_vals)
@@ -240,23 +338,21 @@ def _parse_linha_data(linha: str) -> dict | None:
 
 
 def _titulo_valido(linha: str) -> bool:
-    """Retorna True se a linha pode ser um nome de artista/show."""
     ls = linha.strip()
     if not ls or len(ls) < 3:
         return False
-    # Começa com minúscula → continuação de frase
     if ls[0].islower():
         return False
-    # Primeira palavra é preposição/artigo
     primeira = ls.split()[0].lower().rstrip('.,;:')
     if primeira in PREPOSICOES:
         return False
-    # Prefixo de crédito
     ls_low = ls.lower()
     if any(ls_low.startswith(p) for p in PREFIXOS_DESC):
         return False
-    # É linha de data
     if re.match(r'Dia[s]?\s+\d|De\s+\d|\d{1,2}/\d{1,2}', ls, re.I):
+        return False
+    # Descarta marcadores de página/coluna
+    if re.match(r'\[PAG\d+', ls):
         return False
     return True
 
@@ -264,76 +360,94 @@ def _titulo_valido(linha: str) -> bool:
 def _limpa_titulo(t: str) -> str:
     t = re.sub(r'\bFoto:.*', '', t, flags=re.I)
     t = re.sub(r'\s*\|\s*.*$', '', t)
+    t = re.sub(r'^\[PAG\d+_(ESQ|DIR)\]\s*', '', t)
     return _norm(t)[:90]
+
+
+def _detecta_secao_corte(linha: str) -> bool:
+    """Retorna True se a linha é cabeçalho de seção não-musical."""
+    ls = _norm(linha).upper()
+    # Remove marcador de coluna para comparar
+    ls = re.sub(r'^\[PAG\d+_(ESQ|DIR)\]\s*', '', ls)
+    return any(ls == secao or ls.startswith(secao + " ") for secao in CORTE_SECAO)
 
 
 def parse_musica(texto: str) -> list[dict]:
     # ── 1. Localiza início da seção MÚSICA ───────────────────────────────────
+    # Busca tanto no texto normal quanto dentro dos marcadores de coluna
     idx = -1
     for pat in [r'\bMÚSICA\b', r'\bMUSICA\b']:
-        m = re.search(pat, texto, re.IGNORECASE)
-        if m and (idx == -1 or m.start() < idx):
-            idx = m.start()
+        for m in re.finditer(pat, texto, re.IGNORECASE):
+            if idx == -1 or m.start() < idx:
+                idx = m.start()
 
     if idx == -1:
         print("  ⚠️  Seção 'MÚSICA' não encontrada no PDF.")
+        print("  Primeiros 500 chars do texto extraído:")
+        print(texto[:500])
         return []
 
-    secao_musica = texto[idx:]
+    secao = texto[idx:]
 
-    # ── 2. Corta ao encontrar próxima seção não-musical ──────────────────────
-    corte_idx = len(secao_musica)
-    for secao in CORTE_SECAO:
-        # Busca a seção como linha isolada (cabeçalho)
-        c = re.search(
-            rf'(?:^|\n)[ \t]*{re.escape(secao)}[ \t]*(?:\n|$)',
-            secao_musica, re.IGNORECASE
-        )
-        if c and c.start() > 100 and c.start() < corte_idx:
-            corte_idx = c.start()
-
-    secao_musica = secao_musica[:corte_idx]
-
-    # ── 3. Parse linha a linha ───────────────────────────────────────────────
+    # ── 2. Parse linha a linha dentro da seção MÚSICA ───────────────────────
     eventos       = []
     unidade_atual = None
     titulo_atual  = ""
-    tem_descricao = False   # True depois de registrar o título, até encontrar a data
+    tem_desc      = False
+    em_musica     = True   # flag: ainda estamos na seção MÚSICA
 
-    for linha_raw in secao_musica.split("\n"):
+    for linha_raw in secao.split("\n"):
         linha = _norm(linha_raw)
-        if not linha:
-            tem_descricao = False
+
+        # Remove marcadores de coluna do texto visível
+        linha_limpa = re.sub(r'^\[PAG\d+_(ESQ|DIR)\]\s*', '', linha).strip()
+
+        if not linha_limpa:
+            tem_desc = False
             continue
 
-        # Detecta cabeçalho de unidade
-        if _eh_linha_unidade(linha):
-            unidade_atual = linha
+        # Detecta entrada em nova seção não-musical → para de coletar
+        if _detecta_secao_corte(linha_limpa):
+            em_musica = False
+            unidade_atual = None  # reseta para não capturar da nova seção
+            continue
+
+        # Reativa coleta se voltarmos para um bloco de MÚSICA
+        # (em PDFs com múltiplas colunas, MÚSICA pode aparecer em ambas)
+        if re.match(r'\b(MÚSICA|MUSICA)\b', linha_limpa, re.I):
+            em_musica = True
+            continue
+
+        if not em_musica:
+            continue
+
+        # Detecta linha de unidade Sesc
+        if _eh_linha_unidade(linha_limpa):
+            unidade_atual = linha_limpa
             titulo_atual  = ""
-            tem_descricao = False
+            tem_desc      = False
             continue
 
         if not unidade_atual:
             continue
 
         # Detecta linha de data/metadados → fecha o evento
-        ev = _parse_linha_data(linha)
+        ev = _parse_linha_data(linha_limpa)
         if ev:
             if titulo_atual:
                 ev["Artista / Título"] = _limpa_titulo(titulo_atual)
                 ev["Unidade"]          = f"Sesc {unidade_atual.title()}"
                 eventos.append(ev)
-            titulo_atual  = ""
-            tem_descricao = False
+            titulo_atual = ""
+            tem_desc     = False
             continue
 
-        # Linha de título ou descrição
-        if not tem_descricao:
-            # Primeira linha após unidade ou após evento fechado: deve ser título
-            if _titulo_valido(linha):
-                titulo_atual  = _limpa_titulo(linha)
-                tem_descricao = True
-        # Se já tem título, ignora linhas de descrição (não sobrescreve)
+        # Título ou descrição
+        if not tem_desc:
+            if _titulo_valido(linha_limpa):
+                titulo_atual = _limpa_titulo(linha_limpa)
+                tem_desc     = True
+        # Linhas subsequentes são descrição — não sobrescreve o título
 
     return eventos
 
@@ -348,7 +462,6 @@ def gerar_excel(eventos: list[dict], caminho: Path, mes_ref: str) -> None:
     ws.title = "Programação Musical"
     nc = len(COLUNAS)
 
-    # Linha 1: título
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=nc)
     c = ws.cell(row=1, column=1)
     c.value     = f"Programação Musical – Sesc SP Capital | {mes_ref}"
@@ -357,7 +470,6 @@ def gerar_excel(eventos: list[dict], caminho: Path, mes_ref: str) -> None:
     c.alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 28
 
-    # Linha 2: subtítulo
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=nc)
     c = ws.cell(row=2, column=1)
     c.value     = (f"Extraído em: {datetime.now().strftime('%d/%m/%Y %H:%M')}"
@@ -366,7 +478,6 @@ def gerar_excel(eventos: list[dict], caminho: Path, mes_ref: str) -> None:
     c.alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[2].height = 16
 
-    # Linha 3: cabeçalho
     for ci, nome in enumerate(COLUNAS, 1):
         c = ws.cell(row=3, column=ci, value=nome)
         c.font      = Font(name="Arial", bold=True, size=10, color=COR_BRANCO)
@@ -413,7 +524,7 @@ def gerar_excel(eventos: list[dict], caminho: Path, mes_ref: str) -> None:
 def main():
     print("=" * 58)
     print("  Sesc SP – Programação Musical da Capital")
-    print("  Extrator via PDF 'Em Cartaz' (pdfplumber)")
+    print("  Extrator via PDF 'Em Cartaz' (pdfplumber + coords XY)")
     print("=" * 58)
 
     agora   = datetime.now()
@@ -435,41 +546,35 @@ def main():
         print(f"\n📥 Baixando: {url_pdf.split('uploads/')[-1]}")
         conteudo = baixar_pdf(url_pdf)
         if conteudo:
-            print("📄 Extraindo texto com pdfplumber...")
+            print("📄 Extraindo texto por coordenadas XY...")
             texto = extrair_texto(conteudo)
             if texto.strip():
                 print(f"   Texto extraído: {len(texto):,} chars")
         else:
             print("❌ Falha ao baixar o PDF.")
 
+    # Fallback: variável de ambiente com caminho local
     if not texto.strip():
-        # Verifica se há PDF local especificado via variável de ambiente
-        # (útil para GitHub Actions: PDF_LOCAL_PATH=/caminho/do/arquivo.pdf)
         caminho_env = os.environ.get("PDF_LOCAL_PATH", "").strip().strip('"')
         if caminho_env and Path(caminho_env).exists():
             print(f"📄 Lendo PDF local (PDF_LOCAL_PATH): {caminho_env}")
             texto = ler_pdf_local(caminho_env)
 
     if not texto.strip():
-        # Modo interativo: só pede input se estiver num terminal real
         if sys.stdin.isatty():
             print("\n⚠️  PDF não obtido automaticamente.")
             print("   Baixe o PDF 'Em Cartaz' em sescsp.org.br/programacao")
             caminho_manual = input("   Informe o caminho do PDF: ").strip().strip('"')
             if caminho_manual and Path(caminho_manual).exists():
-                print("📄 Lendo PDF local...")
                 texto = ler_pdf_local(caminho_manual)
             else:
-                print("❌ Caminho inválido ou não informado.")
+                print("❌ Caminho inválido.")
                 sys.exit(1)
         else:
-            # Ambiente CI/automação: falha com mensagem clara
-            print("\n❌ PDF não encontrado automaticamente e não há terminal para entrada manual.")
-            print("   Verifique se a URL do PDF está correta para o mês atual.")
+            print("\n❌ PDF não encontrado automaticamente (ambiente CI).")
             print(f"   Mês buscado: {mes_ref}")
-            print("   URLs testadas: veja o log acima (linhas com 🔎)")
-            print("   Dica: o PDF de julho costuma ser publicado na última semana de junho.")
-            print("   Se ainda não foi publicado, aguarde e re-execute o workflow.")
+            print("   O PDF pode ainda não ter sido publicado pelo Sesc.")
+            print("   Aguarde e re-execute o workflow quando estiver disponível.")
             sys.exit(1)
 
     if not texto.strip():
@@ -481,11 +586,9 @@ def main():
 
     if not eventos:
         print("\n⚠️  Nenhum evento encontrado.")
-        print("   Trecho do texto extraído para diagnóstico:")
-        idx = texto.find("MÚSICA")
-        if idx == -1:
-            idx = 0
-        print(texto[idx:idx+800])
+        idx = max(texto.find("MÚSICA"), texto.find("MUSICA"), 0)
+        print("Trecho do texto extraído (seção MÚSICA):")
+        print(texto[idx:idx+1000])
         sys.exit(1)
 
     eventos.sort(key=lambda x: (x.get("Unidade",""), x.get("Data","")))
