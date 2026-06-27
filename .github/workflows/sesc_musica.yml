@@ -1,18 +1,11 @@
-name: 🎵 Sesc SP – Programação Musical Mensal
+name: Sesc SP - Programacao Musical Mensal
 
-# ──────────────────────────────────────────────────────────────
-# QUANDO EXECUTAR
-# ──────────────────────────────────────────────────────────────
 on:
-  # Gatilho temporário para forçar o GitHub a registrar o workflow na aba Actions
-  push:
-    branches: [ "main" ]
-
-  # Automático: todo dia 25 do mês às 9h (horário de Brasília = 12h UTC)
   schedule:
+    # Todo dia 25 do mês às 9h (horário de Brasília = 12h UTC)
     - cron: "0 12 25 * *"
 
-  # Manual: permite rodar a qualquer momento pelo painel do GitHub
+  # Permite rodar manualmente pelo painel do GitHub
   workflow_dispatch:
     inputs:
       forcar_envio:
@@ -22,9 +15,6 @@ on:
         type: choice
         options: ["false", "true"]
 
-# ──────────────────────────────────────────────────────────────
-# JOBS
-# ──────────────────────────────────────────────────────────────
 jobs:
   extrair-e-notificar:
     name: Extrair programação e notificar
@@ -32,55 +22,47 @@ jobs:
     timeout-minutes: 15
 
     permissions:
-      contents: write   # para fazer commit do hash e histórico
+      contents: write
 
     steps:
 
-      # 1. Baixa o código do repositório
-      - name: 📥 Checkout do repositório
+      - name: Checkout do repositorio
         uses: actions/checkout@v4.2.2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 2. Configura Python
-      - name: 🐍 Configurar Python 3.11
+      - name: Configurar Python 3.11
         uses: actions/setup-python@v5.6.0
         with:
           python-version: "3.11"
-         
+          cache: pip
 
-      # 3. Instala dependências
-      - name: 📦 Instalar dependências
+      - name: Instalar dependencias
         run: |
           pip install --upgrade pip
           pip install requests pdfplumber openpyxl
 
-      # 4. Roda o extrator principal
-      - name: 🎵 Extrair programação musical
+      - name: Extrair programacao musical
+        id: extrair
         run: |
           cd ${{ github.workspace }}
           python scripts/sesc_musica_capital.py
         env:
-          # Garante que o script não peça input manual
           PYTHONUNBUFFERED: "1"
 
-      # 5. Lista o arquivo gerado (debug)
-      - name: 📋 Verificar arquivo gerado
+      - name: Verificar arquivo gerado
         run: |
-          echo "Arquivos gerados:"
-          ls -lh *.xlsx 2>/dev/null || echo "(nenhum .xlsx na raiz)"
-          ls -lh scripts/*.xlsx 2>/dev/null || echo "(nenhum .xlsx em scripts/)"
+          echo "=== Arquivos xlsx gerados ==="
+          find . -name "sesc_musica_capital_*.xlsx" ! -path "./historico/*" | sort
+          echo "=== Fim ==="
 
-      # 6. Move o xlsx para a raiz do projeto (se gerado em scripts/)
-      - name: 📂 Organizar arquivo Excel
+      - name: Organizar arquivo Excel
         run: |
-          # Move qualquer xlsx gerado para a raiz do repositório
-          find . -maxdepth 2 -name "sesc_musica_capital_*.xlsx" \
+          find . -maxdepth 3 -name "sesc_musica_capital_*.xlsx" \
             ! -path "./historico/*" \
             -exec mv {} . \; 2>/dev/null || true
 
-      # 7. Compara com versão anterior e envia e-mail
-      - name: 📬 Comparar mudanças e notificar
+      - name: Comparar mudancas e notificar
         run: |
           cd ${{ github.workspace }}
           python scripts/comparar_e_notificar.py
@@ -90,8 +72,17 @@ jobs:
           EMAIL_DESTINO:  ${{ secrets.EMAIL_DESTINO }}
           FORCAR_ENVIO:   ${{ github.event.inputs.forcar_envio || 'false' }}
 
-      # 8. Faz commit do hash e histórico de volta ao repositório
-      - name: 💾 Salvar histórico no repositório
+      - name: Salvar historico no repositorio
         run: |
           git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add ultimo_hash.json historico/ sesc_musica_capital_*.xlsx 2>/dev/null || true
+
+          if git diff --staged --quiet; then
+            echo "Nada novo para commitar."
+          else
+            DATA=$(date '+%Y-%m-%d %H:%M')
+            git commit -m "Programacao musical atualizada - $DATA"
+            git push
+          fi
