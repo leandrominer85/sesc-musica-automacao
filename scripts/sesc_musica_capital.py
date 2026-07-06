@@ -106,39 +106,100 @@ def _pdf_existe(url):
         return False
 
 
-def descobrir_url_pdf(ano, mes):
-    m       = MESES_PT[mes]
-    mes_pub = mes - 1 if mes > 1 else 12
-    ano_pub = ano if mes > 1 else ano - 1
-    candidatos = [
-        f"https://www.sescsp.org.br/wp-content/uploads/{ano_pub}/{mes_pub:02d}/V11_Em-Cartaz_{ano}_{m}_15-bx.pdf",
-        f"https://www.sescsp.org.br/wp-content/uploads/{ano_pub}/{mes_pub:02d}/V12_Em-Cartaz_{ano}_{m}_15-bx.pdf",
-        f"https://www.sescsp.org.br/wp-content/uploads/{ano_pub}/{mes_pub:02d}/V10_Em-Cartaz_{ano}_{m}_15-bx.pdf",
-        f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mes:02d}/V11_Em-Cartaz_{ano}_{m}_15-bx.pdf",
-        f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mes:02d}/Em-Cartaz_{ano}_{m}.pdf",
-        f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mes:02d}/Em-Cartaz-{m}-{ano}.pdf",
+# Padrão para detectar qualquer PDF "Em Cartaz" no HTML
+_RE_PDF = re.compile(
+    r'https://www\.sescsp\.org\.br/wp-content/uploads/[^\s"\'<>]*'
+    r'[Ee][Mm][- _][Cc][Aa][Rr][Tt][Aa][Zz][^\s"\'<>]*\.pdf',
+    re.IGNORECASE
+)
+
+# Abreviações dos meses usadas nos nomes de arquivo
+MESES_ABREV = {
+    1:"JAN", 2:"FEV", 3:"MAR", 4:"ABR", 5:"MAI", 6:"JUN",
+    7:"JUL", 8:"AGO", 9:"SET", 10:"OUT", 11:"NOV", 12:"DEZ",
+}
+
+
+def buscar_pdf_no_html(ano: int, mes: int) -> str | None:
+    """
+    Estratégia principal: raspa o HTML do site para encontrar o link real do PDF.
+    O nome do arquivo muda a cada edição — essa é a única forma confiável.
+    """
+    m_lower = MESES_PT[mes]          # "julho"
+    m_abrev = MESES_ABREV[mes]       # "JUL"
+
+    paginas = [
+        "https://www.sescsp.org.br/programacao/",
+        "https://www.sescsp.org.br/",
+        f"https://www.sescsp.org.br/wp-sitemap.xml",
     ]
-    for url in candidatos:
-        print(f"  🔎 {url.split('uploads/')[-1]}")
-        if _pdf_existe(url):
-            return url
+
+    for url_busca in paginas:
+        try:
+            r = requests.get(url_busca, headers=HEADERS, timeout=20)
+            if r.status_code != 200:
+                continue
+
+            pdfs = _RE_PDF.findall(r.text)
+            print(f"  📄 {len(pdfs)} PDF(s) encontrado(s) em {url_busca.split('sescsp.org.br/')[-1]}")
+
+            for u in pdfs:
+                u_low = u.lower()
+                # Confere se o PDF é do mês/ano correto
+                if (str(ano) in u and
+                        (m_lower in u_low or m_abrev.lower() in u_low)):
+                    print(f"  ✅ Match: {u.split('uploads/')[-1]}")
+                    return u
+
+        except Exception as e:
+            print(f"  ⚠️  Erro ao acessar {url_busca}: {e}")
+
     return None
 
 
-def buscar_pdf_no_html(ano, mes):
-    m = MESES_PT[mes]
-    for base in ["https://www.sescsp.org.br/programacao/", "https://www.sescsp.org.br/"]:
-        try:
-            r = requests.get(base, headers=HEADERS, timeout=15)
-            pdfs = re.findall(
-                r'https://www\.sescsp\.org\.br/wp-content/uploads/[^\s"\'<>]*'
-                r'[Ee]m[- _][Cc]artaz[^\s"\'<>]*\.pdf', r.text
-            )
-            for u in pdfs:
-                if m in u.lower() or str(ano) in u:
-                    return u
-        except Exception:
-            pass
+def descobrir_url_pdf(ano: int, mes: int) -> str | None:
+    """
+    Primeiro tenta raspar o HTML (mais confiável).
+    Fallback: testa URLs candidatas com padrões históricos.
+    """
+    # 1. Raspagem do HTML — método primário
+    print("  🌐 Buscando link no HTML do site...")
+    url = buscar_pdf_no_html(ano, mes)
+    if url:
+        return url
+
+    # 2. Fallback: candidatos baseados em padrões históricos
+    print("  🔎 Testando URLs candidatas...")
+    m      = MESES_PT[mes]
+    m_abr  = MESES_ABREV[mes]
+    # Mês de publicação = mês anterior
+    mes_pub = mes - 1 if mes > 1 else 12
+    ano_pub = ano if mes > 1 else ano - 1
+
+    candidatos = [
+        # Padrões recentes (2026)
+        f"https://www.sescsp.org.br/wp-content/uploads/{ano_pub}/{mes_pub:02d}/Em-Cartaz_{ano}_{m}_compressed.pdf",
+        f"https://www.sescsp.org.br/wp-content/uploads/{ano_pub}/{mes_pub:02d}/V11_Em-Cartaz_{ano}_{m}_15-bx.pdf",
+        f"https://www.sescsp.org.br/wp-content/uploads/{ano_pub}/{mes_pub:02d}/V12_Em-Cartaz_{ano}_{m}_15-bx.pdf",
+        f"https://www.sescsp.org.br/wp-content/uploads/{ano_pub}/{mes_pub:02d}/V10_Em-Cartaz_{ano}_{m}_15-bx.pdf",
+        f"https://www.sescsp.org.br/wp-content/uploads/{ano_pub}/{mes_pub:02d}/V11_EM-CARTAZ_{m_abr}_{ano}_bx.pdf",
+        f"https://www.sescsp.org.br/wp-content/uploads/{ano_pub}/{mes_pub:02d}/V9_EM-CARTAZ_{m_abr}_{ano}.pdf",
+        # Com ano na pasta
+        f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mes:02d}/Em-Cartaz_{ano}_{m}_compressed.pdf",
+        f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mes:02d}/V11_Em-Cartaz_{ano}_{m}_15-bx.pdf",
+        f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mes:02d}/Em-Cartaz_{ano}_{m}.pdf",
+        f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mes:02d}/Em-Cartaz-{m}-{ano}.pdf",
+        # Pasta 2025 (padrão visto no PDF de julho 2026)
+        f"https://www.sescsp.org.br/wp-content/uploads/2025/01/Em-Cartaz_{ano}_{m}_compressed.pdf",
+    ]
+
+    for url in candidatos:
+        nome = url.split('uploads/')[-1]
+        print(f"    {nome}")
+        if _pdf_existe(url):
+            print(f"  ✅ Encontrado: {nome}")
+            return url
+
     return None
 
 
