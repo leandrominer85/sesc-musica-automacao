@@ -241,7 +241,7 @@ def parse(texto):
 
     def fecha():
         nonlocal ev,tit,desc
-        if ev is not None and tit:
+        if ev is not None and tit and unid:
             ev["Artista / Título"]=_limpa(tit)
             ev["Unidade"]=f"Sesc {unid.title()}"
             eventos.append(ev)
