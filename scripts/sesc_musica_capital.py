@@ -62,9 +62,10 @@ LARG = [42,24,26,12,22,16]
 
 # ─── LOCALIZAR E BAIXAR PDF ──────────────────────────────────────────────────
 
+# Regex para qualquer PDF no site do Sesc
 _RE_PDF = re.compile(
-    r'https://www\.sescsp\.org\.br/wp-content/uploads/[^\s"\'<>]*'
-    r'[Ee][Mm][- _][Cc][Aa][Rr][Tt][Aa][Zz][^\s"\'<>]*\.pdf', re.I)
+    r'https://www\.sescsp\.org\.br/wp-content/uploads/'
+    r'[^\s"\'<>]*[Ee][Mm][- _][Cc][Aa][Rr][Tt][Aa][Zz][^\s"\'<>]*\.pdf', re.I)
 
 def _ok(url):
     try:
@@ -72,45 +73,62 @@ def _ok(url):
         return r.status_code==200 and "pdf" in r.headers.get("Content-Type","").lower()
     except: return False
 
+def _match_mes(url, ano, mes):
+    ul=url.lower(); m=MESES_PT[mes]; ma=MESES_ABR[mes].lower()
+    return str(ano) in url and (m in ul or ma in ul or m[:3] in ul)
+
 def buscar_html(ano, mes):
-    m = MESES_PT[mes]; ma = MESES_ABR[mes].lower()
-    for base in ["https://www.sescsp.org.br/programacao/","https://www.sescsp.org.br/"]:
+    paginas=["https://www.sescsp.org.br/editorial/emcartaz/","https://www.sescsp.org.br/programacao/","https://www.sescsp.org.br/","https://www.sescsp.org.br/wp-sitemap.xml"]
+    for base in paginas:
         try:
-            r = requests.get(base, headers=HEADERS, timeout=20)
-            if r.status_code != 200: continue
-            pdfs = _RE_PDF.findall(r.text)
-            print(f"  📄 {len(pdfs)} PDF(s) em {base.split('sescsp.org.br/')[-1]}")
-            for u in pdfs:
-                ul = u.lower()
-                if str(ano) in u and (m in ul or ma in ul):
+            r=requests.get(base,headers=HEADERS,timeout=20)
+            if r.status_code!=200: continue
+            todos=_RE_PDF.findall(r.text)
+            em_c=[u for u in todos if re.search(r'[Ee]m.?[Cc]artaz|EM.?CARTAZ',u)]
+            print(f"  📄 {len(em_c)} PDF(s) Em Cartaz em {base.split('sescsp.org.br/')[-1]}")
+            for u in em_c:
+                if _match_mes(u,ano,mes):
                     print(f"  ✅ Match HTML: {u.split('uploads/')[-1]}"); return u
         except Exception as e: print(f"  ⚠️  {base}: {e}")
     return None
 
 def candidatos(ano, mes):
-    m=MESES_PT[mes]; ma=MESES_ABR[mes]; mp=mes-1 if mes>1 else 12; ap=ano if mes>1 else ano-1
+    m=MESES_PT[mes]; mc=m.capitalize(); ma=MESES_ABR[mes]
+    mp=mes-1 if mes>1 else 12; ap=ano if mes>1 else ano-1
     return [
-        f"https://www.sescsp.org.br/wp-content/uploads/{ap}/{mp:02d}/Em-Cartaz_{ano}_{m}_compressed.pdf",
+        # Padrão ago/2026: ano/mes-anterior/Em-Cartaz_ano_mes.pdf
+        f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mp:02d}/Em-Cartaz_{ano}_{m}.pdf",
+        f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mp:02d}/Em-Cartaz_{ano}_{m}_compressed.pdf",
+        # Padrão com hífen e maiúscula: ago/2024, ago/2023
+        f"https://www.sescsp.org.br/wp-content/uploads/{ap}/{mp:02d}/Em-Cartaz-{mc}-{ano}.pdf",
+        f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mp:02d}/Em-Cartaz-{mc}-{ano}.pdf",
+        # Padrão V11 jun/2026
         f"https://www.sescsp.org.br/wp-content/uploads/{ap}/{mp:02d}/V11_Em-Cartaz_{ano}_{m}_15-bx.pdf",
         f"https://www.sescsp.org.br/wp-content/uploads/{ap}/{mp:02d}/V12_Em-Cartaz_{ano}_{m}_15-bx.pdf",
         f"https://www.sescsp.org.br/wp-content/uploads/{ap}/{mp:02d}/V10_Em-Cartaz_{ano}_{m}_15-bx.pdf",
+        # EM-CARTAZ maiúsculo
         f"https://www.sescsp.org.br/wp-content/uploads/{ap}/{mp:02d}/V11_EM-CARTAZ_{ma}_{ano}_bx.pdf",
         f"https://www.sescsp.org.br/wp-content/uploads/{ap}/{mp:02d}/V9_EM-CARTAZ_{ma}_{ano}.pdf",
-        f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mes:02d}/Em-Cartaz_{ano}_{m}_compressed.pdf",
-        f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mes:02d}/V11_Em-Cartaz_{ano}_{m}_15-bx.pdf",
+        # Pasta 2025/01 (jul/2026, ago/2025)
         f"https://www.sescsp.org.br/wp-content/uploads/2025/01/Em-Cartaz_{ano}_{m}_compressed.pdf",
-        f"https://www.sescsp.org.br/wp-content/uploads/2025/06/Em-Cartaz_{ano}_{m}_compressed.pdf",
+        f"https://www.sescsp.org.br/wp-content/uploads/2025/01/Em-Cartaz-{mc}-{ano}.pdf",
+        # AF_ ago/2025
+        f"https://www.sescsp.org.br/wp-content/uploads/{ap}/{mp:02d}/AF_EM-CARTAZ_{ma}{ano}_BaixaDuplas-1.pdf",
+        # Ano corrente pasta mes-anterior (variações extras)
+        f"https://www.sescsp.org.br/wp-content/uploads/{ano}/{mp:02d}/Em-Cartaz-{ano}-{m}.pdf",
+        f"https://www.sescsp.org.br/wp-content/uploads/{ap}/{mp:02d}/Em-Cartaz_{ano}_{m}.pdf",
     ]
 
 def descobrir_pdf(ano, mes):
     print("  🌐 Raspando HTML do site...")
-    u = buscar_html(ano, mes)
+    u=buscar_html(ano,mes)
     if u: return u
     print("  🔎 Testando URLs candidatas...")
-    for u in candidatos(ano, mes):
+    for u in candidatos(ano,mes):
         print(f"    {u.split('uploads/')[-1]}")
         if _ok(u): print(f"  ✅ {u.split('uploads/')[-1]}"); return u
     return None
+
 
 def baixar(url):
     try:
