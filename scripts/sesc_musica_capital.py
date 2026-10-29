@@ -107,23 +107,24 @@ class ListaProgramacao(BaseModel):
 
 
 # =====================================================================
-# 2. SELEÇÃO AUTOMÁTICA DO MODELO GEMINI (gemini-3.0-flash)
+# 2. FILA DE MODELOS GEMINI (COM BLOQUEIO DO 2.5-FLASH E FALLBACK)
 # =====================================================================
 
-def obter_modelo_gemini(client: genai.Client) -> str:
-    """Seleciona gemini-3.0-flash ou descobre dinamicamente o modelo ativo na chave."""
-    preferidos = [
-        "gemini-3.0-flash",
-        "gemini-3-flash",
-        "gemini-3.0-pro",
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.0-flash",
-    ]
+def obter_fila_modelos_gemini(client: genai.Client) -> List[str]:
+    """
+    Monta uma fila ordenada de modelos ativos na chave, bloqueando explicitamente
+    'gemini-2.5-flash' (desativado para novos usuários).
+    """
+    modelos_bloqueados = {"gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"}
+    disponiveis = []
+
     try:
-        disponiveis = []
         for m in client.models.list():
             nome = (m.name or "").replace("models/", "")
+            if nome in modelos_bloqueados:
+                continue
+            if any(x in nome.lower() for x in ["tts", "image", "audio", "embedding", "vision", "aqa", "bison", "gecko"]):
+                continue
             acoes = (
                 getattr(m, "supported_actions", None)
                 or getattr(m, "supported_generation_methods", None)
@@ -131,18 +132,35 @@ def obter_modelo_gemini(client: genai.Client) -> str:
             )
             if not acoes or "generateContent" in acoes:
                 disponiveis.append(nome)
-        print(f"ℹ️ Modelos Gemini disponíveis na chave: {disponiveis[:10]}")
-        for pref in preferidos:
-            if pref in disponiveis:
-                print(f"✅ Modelo selecionado: {pref}")
-                return pref
-        for disp in disponiveis:
-            if "flash" in disp.lower() and not any(x in disp.lower() for x in ["tts", "image", "audio", "embedding"]):
-                print(f"✅ Modelo Flash selecionado: {disp}")
-                return disp
+        print(f"ℹ️ Modelos compatíveis na chave (sem bloqueados): {disponiveis}")
     except Exception as e:
         print(f"⚠️ Aviso ao listar modelos: {e}")
-    return "gemini-3.0-flash"
+
+    # 1º: Qualquer modelo Gemini 3 listado na chave
+    modelos_v3 = [m for m in disponiveis if "gemini-3" in m.lower()]
+
+    # 2º: Modelos prioritários e aliases ativos confirmados na chave
+    preferidos_fixos = [
+        "gemini-3.0-flash",
+        "gemini-3-flash-preview",
+        "gemini-3.0-flash-preview",
+        "gemini-flash-latest",
+        "gemini-2.5-flash-lite",
+        "gemini-flash-lite-latest",
+        "gemini-2.5-pro",
+        "gemini-pro-latest",
+    ]
+
+    # 3º: Outros modelos Gemini da conta
+    outros_gemini = [m for m in disponiveis if m.startswith("gemini-")]
+
+    fila = []
+    for candidato in modelos_v3 + preferidos_fixos + outros_gemini:
+        if candidato not in modelos_bloqueados and candidato not in fila:
+            fila.append(candidato)
+
+    print(f"✅ Fila de tentativa de modelos: {fila[:8]}")
+    return fila
 
 
 # =====================================================================
@@ -166,8 +184,8 @@ class _PdfCapturadoSucesso(Exception):
 
 def tentar_baixar_com_codigo_original_do_repo(destino_pdf: Path) -> bool:
     """
-    Recupera a lógica de download original do repositório (que gerou o PDF antes da refatoração)
-    e intercepta o arquivo PDF assim que ele é entregue ao pdfplumber.open().
+    Recupera a lógica de download original do repositório e intercepta
+    o arquivo PDF assim que ele é entregue ao pdfplumber.open().
     """
     print("🔍 [Camada 1] Executando método original de download do repositório...")
     repo = os.environ.get("GITHUB_REPOSITORY", "leandrominer85/sesc-musica-automacao")
@@ -236,7 +254,6 @@ def tentar_baixar_com_codigo_original_do_repo(destino_pdf: Path) -> bool:
 
 
 def validar_e_baixar_url(url: str, destino_pdf: Path) -> bool:
-    """Baixa a URL (seguindo redirecionamentos) e verifica se a assinatura binária é %PDF."""
     try:
         r = requests.get(url, headers=HEADERS_HTTP, timeout=45, stream=True, allow_redirects=True)
         if r.status_code != 200:
@@ -284,11 +301,9 @@ def obter_e_baixar_pdf(agora: datetime, destino_pdf: Path) -> Path:
         if validar_e_baixar_url(URL_PDF_FIXA, destino_pdf):
             return destino_pdf
 
-    # CAMADA 1: Método original do próprio repositório
     if tentar_baixar_com_codigo_original_do_repo(destino_pdf):
         return destino_pdf
 
-    # CAMADA 2: API REST do WordPress e páginas do Sesc SP
     print("🔍 [Camada 2] Consultando API WordPress e páginas do Sesc SP...")
     fontes_sesc = [
         "https://www.sescsp.org.br/wp-json/wp/v2/media?mime_type=application/pdf&per_page=100",
@@ -308,45 +323,6 @@ def obter_e_baixar_pdf(agora: datetime, destino_pdf: Path) -> Path:
                         return destino_pdf
         except Exception:
             continue
-
-    # CAMADA 3: Gemini 3.0 Flash com Google Search Grounding
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if api_key:
-        print("🔍 [Camada 3] Localizando PDF via Gemini 3.0 Flash com Google Search...")
-        try:
-            client = genai.Client(api_key=api_key)
-            modelo_ativo = obter_modelo_gemini(client)
-            ano = agora.year
-            mes_nome = MESES_PT[agora.month]
-            prompt_busca = (
-                f"Qual é a URL direta do arquivo PDF da revista 'Em Cartaz' do Sesc SP de {mes_nome} de {ano} "
-                f"(ou a edição mais recente de {ano} hospedada em https://www.sescsp.org.br/wp-content/uploads/...)? "
-                f"Retorne todas as URLs completas terminadas em .pdf encontradas."
-            )
-            resp_ia = client.models.generate_content(
-                model=modelo_ativo,
-                contents=prompt_busca,
-                config=types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())],
-                    temperature=0.0,
-                ),
-            )
-            texto_busca = resp_ia.text or ""
-            urls_grounding = []
-            if resp_ia.candidates and resp_ia.candidates[0].grounding_metadata:
-                gm = resp_ia.candidates[0].grounding_metadata
-                if gm.grounding_chunks:
-                    for chunk in gm.grounding_chunks:
-                        if chunk.web and chunk.web.uri:
-                            urls_grounding.append(chunk.web.uri)
-                        if chunk.web and chunk.web.title:
-                            texto_busca += " " + chunk.web.title
-
-            for cand in extrair_pdfs_cartaz_de_texto(texto_busca) + urls_grounding:
-                if validar_e_baixar_url(cand, destino_pdf):
-                    return destino_pdf
-        except Exception as e:
-            print(f"   Aviso Gemini Search: {e}")
 
     raise RuntimeError(
         "❌ Não foi possível baixar o PDF automaticamente. "
@@ -403,7 +379,7 @@ def filtrar_paginas_musica(caminho_pdf_entrada: str, caminho_pdf_saida: str) -> 
 
 
 # =====================================================================
-# 5. EXTRAÇÃO ESTRUTURADA COM GEMINI 3.0 FLASH
+# 5. EXTRAÇÃO ESTRUTURADA COM FALLBACK AUTOMÁTICO DE MODELO GEMINI
 # =====================================================================
 
 def extrair_eventos_pdf(caminho_pdf: str) -> List[EventoMusical]:
@@ -412,17 +388,16 @@ def extrair_eventos_pdf(caminho_pdf: str) -> List[EventoMusical]:
         raise ValueError("❌ A variável GEMINI_API_KEY não foi encontrada nos Secrets do GitHub!")
 
     client = genai.Client(api_key=api_key)
-    modelo_ativo = obter_modelo_gemini(client)
+    fila_modelos = obter_fila_modelos_gemini(client)
     pdf_filtrado = str(PROJETO_DIR / "temp_secao_musica.pdf")
 
     qtd_paginas = filtrar_paginas_musica(caminho_pdf, pdf_filtrado)
-    print(f"🤖 Enviando {qtd_paginas} página(s) para extração estruturada com {modelo_ativo}...")
+    print(f"📄 {qtd_paginas} página(s) da seção Música isoladas com sucesso.")
 
     arquivo_remoto = client.files.upload(file=pdf_filtrado)
 
-    # Aguarda caso o PDF grande entre em estado PROCESSING na API
     while getattr(arquivo_remoto, "state", None) and getattr(arquivo_remoto.state, "name", "") == "PROCESSING":
-        print("⏳ Aguardando processamento do arquivo PDF nos servidores Gemini...")
+        print("⏳ Aguardando processamento do PDF nos servidores Gemini...")
         time.sleep(3)
         arquivo_remoto = client.files.get(name=arquivo_remoto.name)
 
@@ -440,17 +415,37 @@ def extrair_eventos_pdf(caminho_pdf: str) -> List[EventoMusical]:
     5. Atenção: 'Metrô São Bento', 'Metrô República' ou 'Casa Verde' no meio de um endereço são referências de localização; classifique apenas pela tarja oficial da Unidade do Sesc.
     """
 
+    resultado = None
+    ultimo_erro = None
+
     try:
-        resposta = client.models.generate_content(
-            model=modelo_ativo,
-            contents=[arquivo_remoto, prompt],
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-                response_mime_type="application/json",
-                response_schema=ListaProgramacao,
-            ),
-        )
-        resultado = ListaProgramacao.model_validate_json(resposta.text)
+        for modelo_atual in fila_modelos:
+            try:
+                print(f"🤖 Tentando extração estruturada com o modelo: {modelo_atual}...")
+                resposta = client.models.generate_content(
+                    model=modelo_atual,
+                    contents=[arquivo_remoto, prompt],
+                    config=types.GenerateContentConfig(
+                        temperature=0.0,
+                        response_mime_type="application/json",
+                        response_schema=ListaProgramacao,
+                    ),
+                )
+                resultado = ListaProgramacao.model_validate_json(resposta.text)
+                print(f"✅ Extração concluída com sucesso usando o modelo: {modelo_atual} ({len(resultado.eventos)} eventos brutos)!")
+                break
+            except Exception as e:
+                ultimo_erro = e
+                msg_erro = str(e)
+                print(f"⚠️ Modelo '{modelo_atual}' indisponível ({msg_erro[:110]}...). Tentando próximo da fila...")
+                match_sugerido = re.search(r"use models/([a-zA-Z0-9._-]+)", msg_erro)
+                if match_sugerido:
+                    modelo_sugerido = match_sugerido.group(1)
+                    if modelo_sugerido not in fila_modelos:
+                        fila_modelos.append(modelo_sugerido)
+
+        if resultado is None:
+            raise RuntimeError(f"❌ Nenhum modelo da fila conseguiu processar o PDF. Último erro: {ultimo_erro}")
     finally:
         try:
             client.files.delete(name=arquivo_remoto.name)
