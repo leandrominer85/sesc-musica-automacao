@@ -2,7 +2,7 @@ name: Sesc SP - Programacao Musical Mensal
 
 on:
   schedule:
-    # Todo dia 25 do mês às 9h (horário de Brasília = 12h UTC)
+    # Todo dia 30 do mês às 9h (horário de Brasília = 12h UTC)
     - cron: "0 12 30 * *"
 
   # Permite rodar manualmente pelo painel do GitHub
@@ -25,7 +25,6 @@ jobs:
       contents: write
 
     steps:
-
       - name: Checkout do repositorio
         uses: actions/checkout@v4.2.2
         with:
@@ -39,21 +38,16 @@ jobs:
       - name: Instalar dependencias
         run: |
           pip install --upgrade pip
-          pip install requests pdfplumber openpyxl
+          pip install -r requirements.txt
 
-      - name: Executar extração da programação musical
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          python main.py
-      
       - name: Extrair programacao musical
         id: extrair
+        env:
+          PYTHONUNBUFFERED: "1"
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           cd ${{ github.workspace }}
           python scripts/sesc_musica_capital.py
-        env:
-          PYTHONUNBUFFERED: "1"
 
       - name: Verificar arquivo gerado
         run: |
