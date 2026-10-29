@@ -1,9 +1,8 @@
 import os
 import re
 import sys
-import fitz  # PyMuPDF
+import fitz  # PyMuPDF (import correto recomendado)
 import requests
-from bs4 import BeautifulSoup
 from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -18,6 +17,12 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 # =====================================================================
 
 MESES_PT = {
+    1: "janeiro", 2: "fevereiro", 3: "marco", 4: "abril",
+    5: "maio", 6: "junho", 7: "julho", 8: "agosto",
+    9: "setembro", 10: "outubro", 11: "novembro", 12: "dezembro",
+}
+
+MESES_PT_CAPITAL = {
     1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril",
     5: "Maio", 6: "Junho", 7: "Julho", 8: "Agosto",
     9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
@@ -26,19 +31,21 @@ MESES_PT = {
 SCRIPT_DIR = Path(__file__).parent
 PROJETO_DIR = SCRIPT_DIR.parent
 
+# Se preferir colar o link direto do PDF da revista do mês caso o Sesc mude muito o nome, 
+# basta colocar entre as aspas abaixo. Se deixar vazio (""), o script gera automaticamente.
+URL_PDF_FIXA = "" 
+
 HEADERS_HTTP = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
 
 # =====================================================================
 # 1. ESQUEMA DE VALIDAÇÃO ESTRITA (PYDANTIC)
-# Bloqueia unidades falsas (ex: "Sesc São Bento") e textos truncados
 # =====================================================================
 
 UnidadesCapital = Literal[
@@ -96,54 +103,50 @@ class ListaProgramacao(BaseModel):
 
 
 # =====================================================================
-# 2. LOCALIZAÇÃO E DOWNLOAD AUTOMÁTICO DO PDF "EM CARTAZ"
+# 2. LOCALIZAÇÃO E DOWNLOAD ROBUSTO DO PDF
 # =====================================================================
 
-def localizar_url_pdf_em_cartaz(agora: datetime) -> str:
-    """Localiza o link do PDF mais recente da revista Em Cartaz no Sesc SP."""
-    urls_paginas = [
-        "https://www.sescsp.org.br/revista-em-cartaz/",
-        "https://www.sescsp.org.br/publicacoes/",
-        "https://www.sescsp.org.br/programacao/",
-        "https://www.sescsp.org.br/",
-    ]
+def obter_url_pdf(agora: datetime) -> str:
+    if URL_PDF_FIXA.strip():
+        print(f"🔗 Usando URL fixa configurada: {URL_PDF_FIXA}")
+        return URL_PDF_FIXA.strip()
 
-    padrao_pdf = re.compile(
-        r"https?://(?:www\.)?sescsp\.org\.br/wp-content/uploads/\d{4}/\d{2}/[^\s\"'<>]+?\.pdf",
-        re.IGNORECASE,
+    ano = agora.year
+    mes_atual_idx = agora.month
+    
+    # Se estivermos na última semana do mês, o Sesc publica a revista do mês seguinte
+    # (ou podemos testar ambos)
+    meses_a_testar = [mes_atual_idx]
+    if agora.day >= 20:
+        proximo_mes = mes_atual_idx + 1 if mes_atual_idx < 12 else 1
+        meses_a_testar.insert(0, proximo_mes)
+
+    for m_idx in meses_a_testar:
+        nome_mes = MESES_PT[m_idx]
+        ano_alvo = ano + 1 if (mes_atual_idx == 12 and m_idx == 1) else ano
+        
+        # Variações comuns de URLs que o Sesc utiliza nos uploads do WordPress
+        tentativas = [
+            f"https://www.sescsp.org.br/wp-content/uploads/{ano_alvo}/{m_idx:02d}/em_cartaz_{nome_mes}{ano_alvo}_final_web.pdf",
+            f"https://www.sescsp.org.br/wp-content/uploads/{ano_alvo}/{m_idx:02d}/em_cartaz_{nome_mes}_{ano_alvo}_site.pdf",
+            f"https://www.sescsp.org.br/wp-content/uploads/{ano_alvo}/{m_idx:02d}/em-cartaz-{nome_mes}-{ano_alvo}-site.pdf",
+            f"https://www.sescsp.org.br/wp-content/uploads/{ano_alvo}/{m_idx - 1:02d}/em_cartaz_{nome_mes}{ano_alvo}_final_web.pdf",
+        ]
+        
+        for url in tentativas:
+            try:
+                print(f"🔍 Testando link: {url}")
+                r = requests.head(url, headers=HEADERS_HTTP, timeout=10)
+                if r.status_code == 200:
+                    print(f"✅ PDF válido encontrado: {url}")
+                    return url
+            except Exception:
+                continue
+
+    raise RuntimeError(
+        "❌ Não foi possível adivinhar o link do PDF automaticamente. "
+        "Por favor, insira o link direto do PDF na variável 'URL_PDF_FIXA' no topo de scripts/sesc_musica_capital.py."
     )
-
-    candidatos = []
-    for url in urls_paginas:
-        try:
-            resp = requests.get(url, headers=HEADERS_HTTP, timeout=25)
-            if resp.status_code == 200:
-                links = padrao_pdf.findall(resp.text)
-                for link in links:
-                    if re.search(r"cartaz", link, re.IGNORECASE):
-                        candidatos.append(link)
-        except Exception as e:
-            print(f"⚠️ Aviso ao consultar {url}: {e}")
-
-    if candidatos:
-        print(f"📄 PDF localizado na página do Sesc: {candidatos[0]}")
-        return candidatos[0]
-
-    # Fallback: tenta via API REST pública de mídia do WordPress do Sesc SP
-    try:
-        api_wp = "https://www.sescsp.org.br/wp-json/wp/v2/media?search=cartaz&mime_type=application/pdf&per_page=10"
-        resp_wp = requests.get(api_wp, headers=HEADERS_HTTP, timeout=25)
-        if resp_wp.status_code == 200:
-            itens = resp_wp.json()
-            for item in itens:
-                src = item.get("source_url", "")
-                if src.lower().endswith(".pdf") and "cartaz" in src.lower():
-                    print(f"📄 PDF localizado via API WordPress Sesc: {src}")
-                    return src
-    except Exception as e:
-        print(f"⚠️ Aviso ao consultar API WP: {e}")
-
-    raise RuntimeError("❌ Não foi possível localizar automaticamente o link do PDF Em Cartaz.")
 
 
 def baixar_pdf(url_pdf: str, destino: Path) -> Path:
@@ -161,7 +164,6 @@ def baixar_pdf(url_pdf: str, destino: Path) -> Path:
 
 # =====================================================================
 # 3. FILTRO DE PÁGINAS COM PYMUPDF
-# Descarta páginas de Teatro, Dança, Turismo e Infantil antes da IA ler
 # =====================================================================
 
 def filtrar_paginas_musica(caminho_pdf_entrada: str, caminho_pdf_saida: str) -> int:
@@ -209,13 +211,13 @@ def filtrar_paginas_musica(caminho_pdf_entrada: str, caminho_pdf_saida: str) -> 
 
 
 # =====================================================================
-# 4. EXTRAÇÃO ESTRUTURADA COM GEMINI 2.5 FLASH
+# 4. EXTRAÇÃO COM GEMINI 2.5 FLASH
 # =====================================================================
 
 def extrair_eventos_pdf(caminho_pdf: str) -> List[EventoMusical]:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("❌ A variável GEMINI_API_KEY não foi encontrada! Verifique os Secrets do GitHub.")
+        raise ValueError("❌ A variável GEMINI_API_KEY não foi encontrada nos Secrets do GitHub!")
 
     client = genai.Client(api_key=api_key)
     pdf_filtrado = str(PROJETO_DIR / "temp_secao_musica.pdf")
@@ -267,7 +269,7 @@ def extrair_eventos_pdf(caminho_pdf: str) -> List[EventoMusical]:
 
 
 # =====================================================================
-# 5. GERAÇÃO DO EXCEL NO PADRÃO VISUAL DO REPOSITÓRIO
+# 5. GERAÇÃO DO EXCEL
 # =====================================================================
 
 def salvar_planilha_excel(eventos: List[EventoMusical], mes_ano_label: str, caminho_xlsx: str):
@@ -340,13 +342,13 @@ def salvar_planilha_excel(eventos: List[EventoMusical], mes_ano_label: str, cami
 
 def main():
     agora = datetime.now()
-    mes_ano_label = f"{MESES_PT[agora.month]} {agora.year}"
+    mes_ano_label = f"{MESES_PT_CAPITAL[agora.month]} {agora.year}"
     nome_xlsx = f"sesc_musica_capital_{agora.year}_{agora.month:02d}.xlsx"
     caminho_xlsx = PROJETO_DIR / nome_xlsx
     caminho_pdf_temp = PROJETO_DIR / "em_cartaz_atual.pdf"
 
     try:
-        url_pdf = localizar_url_pdf_em_cartaz(agora)
+        url_pdf = obter_url_pdf(agora)
         baixar_pdf(url_pdf, caminho_pdf_temp)
         eventos = extrair_eventos_pdf(str(caminho_pdf_temp))
         salvar_planilha_excel(eventos, mes_ano_label, str(caminho_xlsx))
