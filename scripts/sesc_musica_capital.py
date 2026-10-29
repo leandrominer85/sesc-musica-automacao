@@ -119,7 +119,7 @@ def validar_url_pdf(url: str) -> bool:
     """Verifica se o link realmente existe e aponta para um PDF válido."""
     try:
         r = requests.get(url, headers=HEADERS_HTTP, timeout=20, stream=True)
-         content_type = r.headers.get("Content-Type", "").lower()
+        content_type = r.headers.get("Content-Type", "").lower()
         valido = r.status_code == 200 and ("pdf" in content_type or url.lower().endswith(".pdf"))
         r.close()
         return valido
