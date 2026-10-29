@@ -1,9 +1,11 @@
 import os
 import re
 import sys
+import time
 import json
 import urllib.parse
-import pymupdf as fitz  # Evita o FutureWarning do PyMuPDF no log
+import types as py_types
+import pymupdf as fitz
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -34,7 +36,6 @@ MESES_PT_CAPITAL = {
 SCRIPT_DIR = Path(__file__).parent
 PROJETO_DIR = SCRIPT_DIR.parent
 
-# Opcional: se quiser forçar um PDF específico, cole a URL abaixo
 URL_PDF_FIXA = os.environ.get("URL_PDF_SESC", "").strip()
 
 HEADERS_HTTP = {
@@ -106,7 +107,46 @@ class ListaProgramacao(BaseModel):
 
 
 # =====================================================================
-# 2. LOCALIZAÇÃO AUTOMÁTICA DO PDF EM 5 CAMADAS
+# 2. SELEÇÃO AUTOMÁTICA DO MODELO GEMINI (gemini-3.0-flash)
+# =====================================================================
+
+def obter_modelo_gemini(client: genai.Client) -> str:
+    """Seleciona gemini-3.0-flash ou descobre dinamicamente o modelo ativo na chave."""
+    preferidos = [
+        "gemini-3.0-flash",
+        "gemini-3-flash",
+        "gemini-3.0-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+    ]
+    try:
+        disponiveis = []
+        for m in client.models.list():
+            nome = (m.name or "").replace("models/", "")
+            acoes = (
+                getattr(m, "supported_actions", None)
+                or getattr(m, "supported_generation_methods", None)
+                or []
+            )
+            if not acoes or "generateContent" in acoes:
+                disponiveis.append(nome)
+        print(f"ℹ️ Modelos Gemini disponíveis na chave: {disponiveis[:10]}")
+        for pref in preferidos:
+            if pref in disponiveis:
+                print(f"✅ Modelo selecionado: {pref}")
+                return pref
+        for disp in disponiveis:
+            if "flash" in disp.lower() and not any(x in disp.lower() for x in ["tts", "image", "audio", "embedding"]):
+                print(f"✅ Modelo Flash selecionado: {disp}")
+                return disp
+    except Exception as e:
+        print(f"⚠️ Aviso ao listar modelos: {e}")
+    return "gemini-3.0-flash"
+
+
+# =====================================================================
+# 3. LOCALIZAÇÃO E DOWNLOAD AUTOMÁTICO DO PDF EM CARTAZ
 # =====================================================================
 
 PADRAO_URL_PDF_SESC = re.compile(
@@ -114,112 +154,177 @@ PADRAO_URL_PDF_SESC = re.compile(
     re.IGNORECASE,
 )
 
+PADRAO_RELATIVO_PDF_SESC = re.compile(
+    r"/wp-content/uploads/\d{4}/\d{2}/[^\s\"'<>\\]+?\.pdf",
+    re.IGNORECASE,
+)
 
-def validar_url_pdf(url: str) -> bool:
-    """Verifica se o link realmente existe e aponta para um PDF válido."""
+
+class _PdfCapturadoSucesso(Exception):
+    pass
+
+
+def tentar_baixar_com_codigo_original_do_repo(destino_pdf: Path) -> bool:
+    """
+    Recupera a lógica de download original do repositório (que gerou o PDF antes da refatoração)
+    e intercepta o arquivo PDF assim que ele é entregue ao pdfplumber.open().
+    """
+    print("🔍 [Camada 1] Executando método original de download do repositório...")
+    repo = os.environ.get("GITHUB_REPOSITORY", "leandrominer85/sesc-musica-automacao")
+    token = os.environ.get("GITHUB_TOKEN", "")
+    headers_gh = {"Accept": "application/vnd.github.v3+json", "User-Agent": "sesc-automacao"}
+    if token:
+        headers_gh["Authorization"] = f"Bearer {token}"
+
     try:
-        r = requests.get(url, headers=HEADERS_HTTP, timeout=20, stream=True)
-        content_type = r.headers.get("Content-Type", "").lower()
-        valido = r.status_code == 200 and ("pdf" in content_type or url.lower().endswith(".pdf"))
+        url_commits = f"https://api.github.com/repos/{repo}/commits?path=scripts/sesc_musica_capital.py&per_page=15"
+        r_commits = requests.get(url_commits, headers=headers_gh, timeout=20)
+        if r_commits.status_code != 200:
+            return False
+
+        commits = r_commits.json()
+        codigo_original = None
+        for c in commits:
+            sha = c["sha"]
+            url_blob = f"https://raw.githubusercontent.com/{repo}/{sha}/scripts/sesc_musica_capital.py"
+            r_code = requests.get(url_blob, headers=headers_gh, timeout=20)
+            if r_code.status_code == 200 and "pydantic" not in r_code.text and "pdfplumber" in r_code.text:
+                codigo_original = r_code.text
+                print(f"   Encontrado downloader original (commit {sha[:7]}). Baixando PDF...")
+                break
+
+        if not codigo_original:
+            return False
+
+        modulo_fake = py_types.ModuleType("pdfplumber")
+
+        def interceptar_open(file_or_path, *args, **kwargs):
+            if isinstance(file_or_path, (str, Path)):
+                destino_pdf.write_bytes(Path(file_or_path).read_bytes())
+            elif isinstance(file_or_path, (bytes, bytearray)):
+                destino_pdf.write_bytes(file_or_path)
+            elif hasattr(file_or_path, "getvalue"):
+                destino_pdf.write_bytes(file_or_path.getvalue())
+            elif hasattr(file_or_path, "read"):
+                if hasattr(file_or_path, "seek"):
+                    file_or_path.seek(0)
+                destino_pdf.write_bytes(file_or_path.read())
+            raise _PdfCapturadoSucesso("PDF capturado com sucesso!")
+
+        modulo_fake.open = interceptar_open
+        modulo_anterior = sys.modules.get("pdfplumber")
+        sys.modules["pdfplumber"] = modulo_fake
+
+        try:
+            escopo = {"__name__": "__main__", "__file__": str(Path(__file__).resolve())}
+            exec(compile(codigo_original, "<original_sesc_download>", "exec"), escopo)
+        except _PdfCapturadoSucesso:
+            if destino_pdf.exists() and destino_pdf.stat().st_size > 10000:
+                tamanho_mb = destino_pdf.stat().st_size / (1024 * 1024)
+                print(f"✅ PDF baixado e capturado com sucesso ({tamanho_mb:.2f} MB)!")
+                return True
+        finally:
+            if modulo_anterior is not None:
+                sys.modules["pdfplumber"] = modulo_anterior
+            else:
+                sys.modules.pop("pdfplumber", None)
+
+    except Exception as e:
+        print(f"   Aviso na Camada 1: {e}")
+
+    return False
+
+
+def validar_e_baixar_url(url: str, destino_pdf: Path) -> bool:
+    """Baixa a URL (seguindo redirecionamentos) e verifica se a assinatura binária é %PDF."""
+    try:
+        r = requests.get(url, headers=HEADERS_HTTP, timeout=45, stream=True, allow_redirects=True)
+        if r.status_code != 200:
+            r.close()
+            return False
+
+        chunks = []
+        primeiro_chunk = None
+        for chunk in r.iter_content(chunk_size=65536):
+            if chunk:
+                if primeiro_chunk is None:
+                    primeiro_chunk = chunk
+                    if not primeiro_chunk.startswith(b"%PDF"):
+                        r.close()
+                        return False
+                chunks.append(chunk)
         r.close()
-        return valido
+
+        if primeiro_chunk and sum(len(c) for c in chunks) > 10000:
+            with open(destino_pdf, "wb") as f:
+                for c in chunks:
+                    f.write(c)
+            tamanho_mb = destino_pdf.stat().st_size / (1024 * 1024)
+            print(f"✅ PDF baixado com sucesso ({tamanho_mb:.2f} MB): {r.url}")
+            return True
     except Exception:
-        return False
+        pass
+    return False
 
 
 def extrair_pdfs_cartaz_de_texto(texto_bruto: str) -> List[str]:
-    """Desescapa barras JSON (\\/) e extrai links de PDF que contenham 'cartaz'."""
     texto_limpo = texto_bruto.replace(r"\/", "/")
     texto_limpo = urllib.parse.unquote(texto_limpo)
-    todos_pdfs = PADRAO_URL_PDF_SESC.findall(texto_limpo)
-    pdfs_cartaz = [u for u in todos_pdfs if "cartaz" in u.lower()]
-    # Remove duplicados preservando a ordem
-    return list(dict.fromkeys(pdfs_cartaz))
+    absolutos = PADRAO_URL_PDF_SESC.findall(texto_limpo)
+    relativos = [f"https://www.sescsp.org.br{m}" for m in PADRAO_RELATIVO_PDF_SESC.findall(texto_limpo)]
+    todos = absolutos + relativos
+    pdfs_cartaz = [u for u in todos if "cartaz" in u.lower()]
+    outros_pdfs = [u for u in todos if "cartaz" not in u.lower()]
+    return list(dict.fromkeys(pdfs_cartaz + outros_pdfs))
 
 
-def obter_url_pdf(agora: datetime) -> str:
-    # CAMADA 0: URL fixa se configurada
+def obter_e_baixar_pdf(agora: datetime, destino_pdf: Path) -> Path:
     if URL_PDF_FIXA:
-        print(f"🔗 [Camada 0] Usando URL fixa: {URL_PDF_FIXA}")
-        return URL_PDF_FIXA
+        print(f"🔗 [Camada 0] Baixando da URL fixa: {URL_PDF_FIXA}")
+        if validar_e_baixar_url(URL_PDF_FIXA, destino_pdf):
+            return destino_pdf
 
-    # CAMADA 1: API REST do WordPress do Sesc SP (Mídias, Posts e Páginas)
-    print("🔍 [Camada 1] Consultando API WordPress do Sesc SP...")
-    endpoints_wp = [
+    # CAMADA 1: Método original do próprio repositório
+    if tentar_baixar_com_codigo_original_do_repo(destino_pdf):
+        return destino_pdf
+
+    # CAMADA 2: API REST do WordPress e páginas do Sesc SP
+    print("🔍 [Camada 2] Consultando API WordPress e páginas do Sesc SP...")
+    fontes_sesc = [
         "https://www.sescsp.org.br/wp-json/wp/v2/media?mime_type=application/pdf&per_page=100",
         "https://www.sescsp.org.br/wp-json/wp/v2/media?search=Cartaz&per_page=50",
-        "https://www.sescsp.org.br/wp-json/wp/v2/media?search=Em-Cartaz&per_page=50",
         "https://www.sescsp.org.br/wp-json/wp/v2/posts?search=Em+Cartaz&per_page=20",
         "https://www.sescsp.org.br/wp-json/wp/v2/pages?search=Em+Cartaz&per_page=20",
-    ]
-    for ep in endpoints_wp:
-        try:
-            resp = requests.get(ep, headers=HEADERS_HTTP, timeout=25)
-            if resp.status_code == 200:
-                candidatos = extrair_pdfs_cartaz_de_texto(resp.text)
-                for url_cand in candidatos:
-                    if validar_url_pdf(url_cand):
-                        print(f"✅ PDF localizado via API WordPress: {url_cand}")
-                        return url_cand
-        except Exception as e:
-            print(f"   Aviso WP ({ep[:55]}...): {e}")
-
-    # CAMADA 2: Varredura das páginas do Sesc SP (desescapando JSON embutido)
-    print("🔍 [Camada 2] Varrendo páginas públicas do Sesc SP...")
-    paginas_sesc = [
         "https://www.sescsp.org.br/programacao/",
         "https://www.sescsp.org.br/revista-em-cartaz/",
-        "https://www.sescsp.org.br/editorial/revista-em-cartaz/",
         "https://www.sescsp.org.br/publicacoes/",
-        "https://www.sescsp.org.br/",
     ]
-    for pag in paginas_sesc:
+    for url_fonte in fontes_sesc:
         try:
-            resp = requests.get(pag, headers=HEADERS_HTTP, timeout=25)
+            resp = requests.get(url_fonte, headers=HEADERS_HTTP, timeout=25)
             if resp.status_code == 200:
-                candidatos = extrair_pdfs_cartaz_de_texto(resp.text)
-                for url_cand in candidatos:
-                    if validar_url_pdf(url_cand):
-                        print(f"✅ PDF localizado na página {pag}: {url_cand}")
-                        return url_cand
-        except Exception as e:
-            print(f"   Aviso página ({pag}): {e}")
+                for cand in extrair_pdfs_cartaz_de_texto(resp.text):
+                    if validar_e_baixar_url(cand, destino_pdf):
+                        return destino_pdf
+        except Exception:
+            continue
 
-    # CAMADA 3: Busca via DuckDuckGo HTML (captura nomes com prefixos como V11_Em-Cartaz_...)
-    print("🔍 [Camada 3] Buscando PDF indexado via buscador web...")
-    ano = agora.year
-    mes_nome = MESES_PT[agora.month]
-    queries_busca = [
-        f'site:sescsp.org.br/wp-content/uploads/{ano} "Cartaz" filetype:pdf',
-        f'site:sescsp.org.br "Em-Cartaz" {ano} {mes_nome} filetype:pdf',
-        f'site:sescsp.org.br "Em Cartaz" {ano} filetype:pdf',
-    ]
-    for q in queries_busca:
-        try:
-            ddg_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(q)}"
-            resp = requests.get(ddg_url, headers=HEADERS_HTTP, timeout=25)
-            if resp.status_code == 200:
-                candidatos = extrair_pdfs_cartaz_de_texto(resp.text)
-                for url_cand in candidatos:
-                    if validar_url_pdf(url_cand):
-                        print(f"✅ PDF localizado via busca web: {url_cand}")
-                        return url_cand
-        except Exception as e:
-            print(f"   Aviso busca web: {e}")
-
-    # CAMADA 4: Gemini 2.5 Flash com Google Search Grounding oficial
+    # CAMADA 3: Gemini 3.0 Flash com Google Search Grounding
     api_key = os.environ.get("GEMINI_API_KEY")
     if api_key:
-        print("🔍 [Camada 4] Usando Gemini com Google Search Grounding para localizar o PDF...")
+        print("🔍 [Camada 3] Localizando PDF via Gemini 3.0 Flash com Google Search...")
         try:
             client = genai.Client(api_key=api_key)
+            modelo_ativo = obter_modelo_gemini(client)
+            ano = agora.year
+            mes_nome = MESES_PT[agora.month]
             prompt_busca = (
-                f"Encontre a URL direta do arquivo PDF da revista 'Em Cartaz' do Sesc SP de {ano} "
-                f"(hospedado em https://www.sescsp.org.br/wp-content/uploads/...). "
-                f"Retorne a URL completa terminada em .pdf."
+                f"Qual é a URL direta do arquivo PDF da revista 'Em Cartaz' do Sesc SP de {mes_nome} de {ano} "
+                f"(ou a edição mais recente de {ano} hospedada em https://www.sescsp.org.br/wp-content/uploads/...)? "
+                f"Retorne todas as URLs completas terminadas em .pdf encontradas."
             )
             resp_ia = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=modelo_ativo,
                 contents=prompt_busca,
                 config=types.GenerateContentConfig(
                     tools=[types.Tool(google_search=types.GoogleSearch())],
@@ -227,43 +332,30 @@ def obter_url_pdf(agora: datetime) -> str:
                 ),
             )
             texto_busca = resp_ia.text or ""
-            # Também inspeciona metadados de grounding se disponíveis
+            urls_grounding = []
             if resp_ia.candidates and resp_ia.candidates[0].grounding_metadata:
                 gm = resp_ia.candidates[0].grounding_metadata
                 if gm.grounding_chunks:
                     for chunk in gm.grounding_chunks:
                         if chunk.web and chunk.web.uri:
-                            texto_busca += " " + chunk.web.uri
+                            urls_grounding.append(chunk.web.uri)
+                        if chunk.web and chunk.web.title:
+                            texto_busca += " " + chunk.web.title
 
-            candidatos = extrair_pdfs_cartaz_de_texto(texto_busca)
-            for url_cand in candidatos:
-                if validar_url_pdf(url_cand):
-                    print(f"✅ PDF localizado via Gemini Google Search: {url_cand}")
-                    return url_cand
+            for cand in extrair_pdfs_cartaz_de_texto(texto_busca) + urls_grounding:
+                if validar_e_baixar_url(cand, destino_pdf):
+                    return destino_pdf
         except Exception as e:
             print(f"   Aviso Gemini Search: {e}")
 
     raise RuntimeError(
-        "❌ Nenhuma das 4 camadas automáticas encontrou o link do PDF. "
+        "❌ Não foi possível baixar o PDF automaticamente. "
         "Cole o link direto do PDF na variável URL_PDF_FIXA no topo de scripts/sesc_musica_capital.py."
     )
 
 
-def baixar_pdf(url_pdf: str, destino: Path) -> Path:
-    print(f"⬇️ Baixando PDF: {url_pdf}")
-    resp = requests.get(url_pdf, headers=HEADERS_HTTP, timeout=60, stream=True)
-    resp.raise_for_status()
-    with open(destino, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=65536):
-            if chunk:
-                f.write(chunk)
-    tamanho_mb = destino.stat().st_size / (1024 * 1024)
-    print(f"✅ Download concluído ({tamanho_mb:.2f} MB)")
-    return destino
-
-
 # =====================================================================
-# 3. FILTRO DE PÁGINAS COM PYMUPDF
+# 4. FILTRO DE PÁGINAS COM PYMUPDF
 # =====================================================================
 
 def filtrar_paginas_musica(caminho_pdf_entrada: str, caminho_pdf_saida: str) -> int:
@@ -311,7 +403,7 @@ def filtrar_paginas_musica(caminho_pdf_entrada: str, caminho_pdf_saida: str) -> 
 
 
 # =====================================================================
-# 4. EXTRAÇÃO COM GEMINI 2.5 FLASH
+# 5. EXTRAÇÃO ESTRUTURADA COM GEMINI 3.0 FLASH
 # =====================================================================
 
 def extrair_eventos_pdf(caminho_pdf: str) -> List[EventoMusical]:
@@ -320,12 +412,19 @@ def extrair_eventos_pdf(caminho_pdf: str) -> List[EventoMusical]:
         raise ValueError("❌ A variável GEMINI_API_KEY não foi encontrada nos Secrets do GitHub!")
 
     client = genai.Client(api_key=api_key)
+    modelo_ativo = obter_modelo_gemini(client)
     pdf_filtrado = str(PROJETO_DIR / "temp_secao_musica.pdf")
 
     qtd_paginas = filtrar_paginas_musica(caminho_pdf, pdf_filtrado)
-    print(f"🤖 Enviando {qtd_paginas} página(s) para extração estruturada com Gemini 2.5 Flash...")
+    print(f"🤖 Enviando {qtd_paginas} página(s) para extração estruturada com {modelo_ativo}...")
 
     arquivo_remoto = client.files.upload(file=pdf_filtrado)
+
+    # Aguarda caso o PDF grande entre em estado PROCESSING na API
+    while getattr(arquivo_remoto, "state", None) and getattr(arquivo_remoto.state, "name", "") == "PROCESSING":
+        print("⏳ Aguardando processamento do arquivo PDF nos servidores Gemini...")
+        time.sleep(3)
+        arquivo_remoto = client.files.get(name=arquivo_remoto.name)
 
     prompt = """
     Você está lendo a revista 'Em Cartaz' do Sesc São Paulo.
@@ -343,7 +442,7 @@ def extrair_eventos_pdf(caminho_pdf: str) -> List[EventoMusical]:
 
     try:
         resposta = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=modelo_ativo,
             contents=[arquivo_remoto, prompt],
             config=types.GenerateContentConfig(
                 temperature=0.0,
@@ -353,7 +452,10 @@ def extrair_eventos_pdf(caminho_pdf: str) -> List[EventoMusical]:
         )
         resultado = ListaProgramacao.model_validate_json(resposta.text)
     finally:
-        client.files.delete(name=arquivo_remoto.name)
+        try:
+            client.files.delete(name=arquivo_remoto.name)
+        except Exception:
+            pass
         if os.path.exists(pdf_filtrado):
             os.remove(pdf_filtrado)
 
@@ -369,7 +471,7 @@ def extrair_eventos_pdf(caminho_pdf: str) -> List[EventoMusical]:
 
 
 # =====================================================================
-# 5. GERAÇÃO DO EXCEL
+# 6. GERAÇÃO DO EXCEL
 # =====================================================================
 
 def salvar_planilha_excel(eventos: List[EventoMusical], mes_ano_label: str, caminho_xlsx: str):
@@ -437,7 +539,7 @@ def salvar_planilha_excel(eventos: List[EventoMusical], mes_ano_label: str, cami
 
 
 # =====================================================================
-# 6. EXECUÇÃO PRINCIPAL (MAIN)
+# 7. EXECUÇÃO PRINCIPAL (MAIN)
 # =====================================================================
 
 def main():
@@ -448,8 +550,7 @@ def main():
     caminho_pdf_temp = PROJETO_DIR / "em_cartaz_atual.pdf"
 
     try:
-        url_pdf = obter_url_pdf(agora)
-        baixar_pdf(url_pdf, caminho_pdf_temp)
+        obter_e_baixar_pdf(agora, caminho_pdf_temp)
         eventos = extrair_eventos_pdf(str(caminho_pdf_temp))
         salvar_planilha_excel(eventos, mes_ano_label, str(caminho_xlsx))
     finally:
