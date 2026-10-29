@@ -1,8 +1,11 @@
 import os
 import re
 import sys
-import fitz  # PyMuPDF (import correto recomendado)
+import json
+import urllib.parse
+import pymupdf as fitz  # Evita o FutureWarning do PyMuPDF no log
 import requests
+from bs4 import BeautifulSoup
 from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -31,16 +34,16 @@ MESES_PT_CAPITAL = {
 SCRIPT_DIR = Path(__file__).parent
 PROJETO_DIR = SCRIPT_DIR.parent
 
-# Se preferir colar o link direto do PDF da revista do mês caso o Sesc mude muito o nome, 
-# basta colocar entre as aspas abaixo. Se deixar vazio (""), o script gera automaticamente.
-URL_PDF_FIXA = "" 
+# Opcional: se quiser forçar um PDF específico, cole a URL abaixo
+URL_PDF_FIXA = os.environ.get("URL_PDF_SESC", "").strip()
 
 HEADERS_HTTP = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8",
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
 
@@ -103,49 +106,146 @@ class ListaProgramacao(BaseModel):
 
 
 # =====================================================================
-# 2. LOCALIZAÇÃO E DOWNLOAD ROBUSTO DO PDF
+# 2. LOCALIZAÇÃO AUTOMÁTICA DO PDF EM 5 CAMADAS
 # =====================================================================
 
+PADRAO_URL_PDF_SESC = re.compile(
+    r"https?://(?:www\.)?sescsp\.org\.br/wp-content/uploads/\d{4}/\d{2}/[^\s\"'<>\\]+?\.pdf",
+    re.IGNORECASE,
+)
+
+
+def validar_url_pdf(url: str) -> bool:
+    """Verifica se o link realmente existe e aponta para um PDF válido."""
+    try:
+        r = requests.get(url, headers=HEADERS_HTTP, timeout=20, stream=True)
+         content_type = r.headers.get("Content-Type", "").lower()
+        valido = r.status_code == 200 and ("pdf" in content_type or url.lower().endswith(".pdf"))
+        r.close()
+        return valido
+    except Exception:
+        return False
+
+
+def extrair_pdfs_cartaz_de_texto(texto_bruto: str) -> List[str]:
+    """Desescapa barras JSON (\\/) e extrai links de PDF que contenham 'cartaz'."""
+    texto_limpo = texto_bruto.replace(r"\/", "/")
+    texto_limpo = urllib.parse.unquote(texto_limpo)
+    todos_pdfs = PADRAO_URL_PDF_SESC.findall(texto_limpo)
+    pdfs_cartaz = [u for u in todos_pdfs if "cartaz" in u.lower()]
+    # Remove duplicados preservando a ordem
+    return list(dict.fromkeys(pdfs_cartaz))
+
+
 def obter_url_pdf(agora: datetime) -> str:
-    if URL_PDF_FIXA.strip():
-        print(f"🔗 Usando URL fixa configurada: {URL_PDF_FIXA}")
-        return URL_PDF_FIXA.strip()
+    # CAMADA 0: URL fixa se configurada
+    if URL_PDF_FIXA:
+        print(f"🔗 [Camada 0] Usando URL fixa: {URL_PDF_FIXA}")
+        return URL_PDF_FIXA
 
+    # CAMADA 1: API REST do WordPress do Sesc SP (Mídias, Posts e Páginas)
+    print("🔍 [Camada 1] Consultando API WordPress do Sesc SP...")
+    endpoints_wp = [
+        "https://www.sescsp.org.br/wp-json/wp/v2/media?mime_type=application/pdf&per_page=100",
+        "https://www.sescsp.org.br/wp-json/wp/v2/media?search=Cartaz&per_page=50",
+        "https://www.sescsp.org.br/wp-json/wp/v2/media?search=Em-Cartaz&per_page=50",
+        "https://www.sescsp.org.br/wp-json/wp/v2/posts?search=Em+Cartaz&per_page=20",
+        "https://www.sescsp.org.br/wp-json/wp/v2/pages?search=Em+Cartaz&per_page=20",
+    ]
+    for ep in endpoints_wp:
+        try:
+            resp = requests.get(ep, headers=HEADERS_HTTP, timeout=25)
+            if resp.status_code == 200:
+                candidatos = extrair_pdfs_cartaz_de_texto(resp.text)
+                for url_cand in candidatos:
+                    if validar_url_pdf(url_cand):
+                        print(f"✅ PDF localizado via API WordPress: {url_cand}")
+                        return url_cand
+        except Exception as e:
+            print(f"   Aviso WP ({ep[:55]}...): {e}")
+
+    # CAMADA 2: Varredura das páginas do Sesc SP (desescapando JSON embutido)
+    print("🔍 [Camada 2] Varrendo páginas públicas do Sesc SP...")
+    paginas_sesc = [
+        "https://www.sescsp.org.br/programacao/",
+        "https://www.sescsp.org.br/revista-em-cartaz/",
+        "https://www.sescsp.org.br/editorial/revista-em-cartaz/",
+        "https://www.sescsp.org.br/publicacoes/",
+        "https://www.sescsp.org.br/",
+    ]
+    for pag in paginas_sesc:
+        try:
+            resp = requests.get(pag, headers=HEADERS_HTTP, timeout=25)
+            if resp.status_code == 200:
+                candidatos = extrair_pdfs_cartaz_de_texto(resp.text)
+                for url_cand in candidatos:
+                    if validar_url_pdf(url_cand):
+                        print(f"✅ PDF localizado na página {pag}: {url_cand}")
+                        return url_cand
+        except Exception as e:
+            print(f"   Aviso página ({pag}): {e}")
+
+    # CAMADA 3: Busca via DuckDuckGo HTML (captura nomes com prefixos como V11_Em-Cartaz_...)
+    print("🔍 [Camada 3] Buscando PDF indexado via buscador web...")
     ano = agora.year
-    mes_atual_idx = agora.month
-    
-    # Se estivermos na última semana do mês, o Sesc publica a revista do mês seguinte
-    # (ou podemos testar ambos)
-    meses_a_testar = [mes_atual_idx]
-    if agora.day >= 20:
-        proximo_mes = mes_atual_idx + 1 if mes_atual_idx < 12 else 1
-        meses_a_testar.insert(0, proximo_mes)
+    mes_nome = MESES_PT[agora.month]
+    queries_busca = [
+        f'site:sescsp.org.br/wp-content/uploads/{ano} "Cartaz" filetype:pdf',
+        f'site:sescsp.org.br "Em-Cartaz" {ano} {mes_nome} filetype:pdf',
+        f'site:sescsp.org.br "Em Cartaz" {ano} filetype:pdf',
+    ]
+    for q in queries_busca:
+        try:
+            ddg_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(q)}"
+            resp = requests.get(ddg_url, headers=HEADERS_HTTP, timeout=25)
+            if resp.status_code == 200:
+                candidatos = extrair_pdfs_cartaz_de_texto(resp.text)
+                for url_cand in candidatos:
+                    if validar_url_pdf(url_cand):
+                        print(f"✅ PDF localizado via busca web: {url_cand}")
+                        return url_cand
+        except Exception as e:
+            print(f"   Aviso busca web: {e}")
 
-    for m_idx in meses_a_testar:
-        nome_mes = MESES_PT[m_idx]
-        ano_alvo = ano + 1 if (mes_atual_idx == 12 and m_idx == 1) else ano
-        
-        # Variações comuns de URLs que o Sesc utiliza nos uploads do WordPress
-        tentativas = [
-            f"https://www.sescsp.org.br/wp-content/uploads/{ano_alvo}/{m_idx:02d}/em_cartaz_{nome_mes}{ano_alvo}_final_web.pdf",
-            f"https://www.sescsp.org.br/wp-content/uploads/{ano_alvo}/{m_idx:02d}/em_cartaz_{nome_mes}_{ano_alvo}_site.pdf",
-            f"https://www.sescsp.org.br/wp-content/uploads/{ano_alvo}/{m_idx:02d}/em-cartaz-{nome_mes}-{ano_alvo}-site.pdf",
-            f"https://www.sescsp.org.br/wp-content/uploads/{ano_alvo}/{m_idx - 1:02d}/em_cartaz_{nome_mes}{ano_alvo}_final_web.pdf",
-        ]
-        
-        for url in tentativas:
-            try:
-                print(f"🔍 Testando link: {url}")
-                r = requests.head(url, headers=HEADERS_HTTP, timeout=10)
-                if r.status_code == 200:
-                    print(f"✅ PDF válido encontrado: {url}")
-                    return url
-            except Exception:
-                continue
+    # CAMADA 4: Gemini 2.5 Flash com Google Search Grounding oficial
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if api_key:
+        print("🔍 [Camada 4] Usando Gemini com Google Search Grounding para localizar o PDF...")
+        try:
+            client = genai.Client(api_key=api_key)
+            prompt_busca = (
+                f"Encontre a URL direta do arquivo PDF da revista 'Em Cartaz' do Sesc SP de {ano} "
+                f"(hospedado em https://www.sescsp.org.br/wp-content/uploads/...). "
+                f"Retorne a URL completa terminada em .pdf."
+            )
+            resp_ia = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt_busca,
+                config=types.GenerateContentConfig(
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                    temperature=0.0,
+                ),
+            )
+            texto_busca = resp_ia.text or ""
+            # Também inspeciona metadados de grounding se disponíveis
+            if resp_ia.candidates and resp_ia.candidates[0].grounding_metadata:
+                gm = resp_ia.candidates[0].grounding_metadata
+                if gm.grounding_chunks:
+                    for chunk in gm.grounding_chunks:
+                        if chunk.web and chunk.web.uri:
+                            texto_busca += " " + chunk.web.uri
+
+            candidatos = extrair_pdfs_cartaz_de_texto(texto_busca)
+            for url_cand in candidatos:
+                if validar_url_pdf(url_cand):
+                    print(f"✅ PDF localizado via Gemini Google Search: {url_cand}")
+                    return url_cand
+        except Exception as e:
+            print(f"   Aviso Gemini Search: {e}")
 
     raise RuntimeError(
-        "❌ Não foi possível adivinhar o link do PDF automaticamente. "
-        "Por favor, insira o link direto do PDF na variável 'URL_PDF_FIXA' no topo de scripts/sesc_musica_capital.py."
+        "❌ Nenhuma das 4 camadas automáticas encontrou o link do PDF. "
+        "Cole o link direto do PDF na variável URL_PDF_FIXA no topo de scripts/sesc_musica_capital.py."
     )
 
 
