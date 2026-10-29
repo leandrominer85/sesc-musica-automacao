@@ -41,6 +41,12 @@ jobs:
           pip install --upgrade pip
           pip install requests pdfplumber openpyxl
 
+      - name: Executar extração da programação musical
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python main.py
+      
       - name: Extrair programacao musical
         id: extrair
         run: |
