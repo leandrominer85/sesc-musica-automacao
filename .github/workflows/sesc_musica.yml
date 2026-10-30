@@ -2,8 +2,8 @@ name: Sesc SP - Programacao Musical Mensal
 
 on:
   schedule:
-    # Todo dia 30 do mês às 9h (horário de Brasília = 12h UTC)
-    - cron: "0 12 30 * *"
+    # Roda todo dia às 12h UTC (9h da manhã em Brasília)
+    - cron: "0 12 * * *"
 
   # Permite rodar manualmente pelo painel do GitHub
   workflow_dispatch:
