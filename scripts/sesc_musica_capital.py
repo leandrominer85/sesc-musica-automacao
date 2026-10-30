@@ -7,7 +7,6 @@ import urllib.parse
 import types as py_types
 import pymupdf as fitz
 import requests
-from bs4 import BeautifulSoup
 from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -107,14 +106,10 @@ class ListaProgramacao(BaseModel):
 
 
 # =====================================================================
-# 2. FILA DE MODELOS GEMINI (COM BLOQUEIO DO 2.5-FLASH E FALLBACK)
+# 2. FILA DE MODELOS GEMINI (COM SUPORTE AO GEMINI 3.8 / 3.0 FLASH)
 # =====================================================================
 
 def obter_fila_modelos_gemini(client: genai.Client) -> List[str]:
-    """
-    Monta uma fila ordenada de modelos ativos na chave, bloqueando explicitamente
-    'gemini-2.5-flash' (desativado para novos usuários).
-    """
     modelos_bloqueados = {"gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"}
     disponiveis = []
 
@@ -132,39 +127,33 @@ def obter_fila_modelos_gemini(client: genai.Client) -> List[str]:
             )
             if not acoes or "generateContent" in acoes:
                 disponiveis.append(nome)
-        print(f"ℹ️ Modelos compatíveis na chave (sem bloqueados): {disponiveis}")
     except Exception as e:
         print(f"⚠️ Aviso ao listar modelos: {e}")
 
-    # 1º: Qualquer modelo Gemini 3 listado na chave
-    modelos_v3 = [m for m in disponiveis if "gemini-3" in m.lower()]
-
-    # 2º: Modelos prioritários e aliases ativos confirmados na chave
     preferidos_fixos = [
+        "gemini-3.8-flash",
         "gemini-3.0-flash",
         "gemini-3-flash-preview",
-        "gemini-3.0-flash-preview",
         "gemini-flash-latest",
         "gemini-2.5-flash-lite",
-        "gemini-flash-lite-latest",
-        "gemini-2.5-pro",
-        "gemini-pro-latest",
     ]
 
-    # 3º: Outros modelos Gemini da conta
     outros_gemini = [m for m in disponiveis if m.startswith("gemini-")]
 
     fila = []
-    for candidato in modelos_v3 + preferidos_fixos + outros_gemini:
-        if candidato not in modelos_bloqueados and candidato not in fila:
-            fila.append(candidato)
+    for cand in preferidos_fixos + outros_gemini:
+        if cand not in modelos_bloqueados and cand not in fila:
+            fila.append(cand)
 
-    print(f"✅ Fila de tentativa de modelos: {fila[:8]}")
+    if not fila:
+        fila = ["gemini-3.8-flash", "gemini-3.0-flash"]
+
+    print(f"✅ Fila de modelos Gemini configurada: {fila[:5]}")
     return fila
 
 
 # =====================================================================
-# 3. LOCALIZAÇÃO E DOWNLOAD AUTOMÁTICO DO PDF EM CARTAZ
+# 3. LOCALIZAÇÃO E DOWNLOAD AUTOMÁTICO DO PDF (MÊS CORRENTE OU SEGUINTE)
 # =====================================================================
 
 PADRAO_URL_PDF_SESC = re.compile(
@@ -183,11 +172,6 @@ class _PdfCapturadoSucesso(Exception):
 
 
 def tentar_baixar_com_codigo_original_do_repo(destino_pdf: Path) -> bool:
-    """
-    Recupera a lógica de download original do repositório e intercepta
-    o arquivo PDF assim que ele é entregue ao pdfplumber.open().
-    """
-    print("🔍 [Camada 1] Executando método original de download do repositório...")
     repo = os.environ.get("GITHUB_REPOSITORY", "leandrominer85/sesc-musica-automacao")
     token = os.environ.get("GITHUB_TOKEN", "")
     headers_gh = {"Accept": "application/vnd.github.v3+json", "User-Agent": "sesc-automacao"}
@@ -208,7 +192,6 @@ def tentar_baixar_com_codigo_original_do_repo(destino_pdf: Path) -> bool:
             r_code = requests.get(url_blob, headers=headers_gh, timeout=20)
             if r_code.status_code == 200 and "pydantic" not in r_code.text and "pdfplumber" in r_code.text:
                 codigo_original = r_code.text
-                print(f"   Encontrado downloader original (commit {sha[:7]}). Baixando PDF...")
                 break
 
         if not codigo_original:
@@ -238,17 +221,14 @@ def tentar_baixar_com_codigo_original_do_repo(destino_pdf: Path) -> bool:
             exec(compile(codigo_original, "<original_sesc_download>", "exec"), escopo)
         except _PdfCapturadoSucesso:
             if destino_pdf.exists() and destino_pdf.stat().st_size > 10000:
-                tamanho_mb = destino_pdf.stat().st_size / (1024 * 1024)
-                print(f"✅ PDF baixado e capturado com sucesso ({tamanho_mb:.2f} MB)!")
                 return True
         finally:
             if modulo_anterior is not None:
                 sys.modules["pdfplumber"] = modulo_anterior
             else:
                 sys.modules.pop("pdfplumber", None)
-
-    except Exception as e:
-        print(f"   Aviso na Camada 1: {e}")
+    except Exception:
+        pass
 
     return False
 
@@ -276,8 +256,6 @@ def validar_e_baixar_url(url: str, destino_pdf: Path) -> bool:
             with open(destino_pdf, "wb") as f:
                 for c in chunks:
                     f.write(c)
-            tamanho_mb = destino_pdf.stat().st_size / (1024 * 1024)
-            print(f"✅ PDF baixado com sucesso ({tamanho_mb:.2f} MB): {r.url}")
             return True
     except Exception:
         pass
@@ -301,18 +279,64 @@ def obter_e_baixar_pdf(agora: datetime, destino_pdf: Path) -> Path:
         if validar_e_baixar_url(URL_PDF_FIXA, destino_pdf):
             return destino_pdf
 
-    if tentar_baixar_com_codigo_original_do_repo(destino_pdf):
-        return destino_pdf
+    # Se estivermos a partir do dia 20 do mês, o Sesc já costuma publicar a revista do mês seguinte.
+    # Definimos a ordem de prioridade: tenta primeiro o mês seguinte (se dia >= 20) e depois o mês corrente.
+    meses_para_tentar = []
+    proximo_mes = agora.month + 1 if agora.month < 12 else 1
+    ano_proximo = agora.year if agora.month < 12 else agora.year + 1
+    
+    if agora.day >= 20:
+        meses_para_tentar.append((proximo_mes, ano_proximo, MESES_PT[proximo_mes]))
+    
+    meses_para_tentar.append((agora.month, agora.year, MESES_PT[agora.month]))
 
-    print("🔍 [Camada 2] Consultando API WordPress e páginas do Sesc SP...")
+    print(f"🔍 Buscando revistas para os meses alvo: {[m[2].upper() for m in meses_para_tentar]}...")
+
+    # Tenta via Gemini Search Grounding buscando especificamente o mês alvo
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if api_key:
+        try:
+            client = genai.Client(api_key=api_key)
+            modelo_ativo = obter_modelo_gemini(client)
+            for m_idx, ano_val, m_nome in meses_para_tentar:
+                print(f"🤖 Pesquisando PDF de {m_nome.upper()} {ano_val} via Gemini Search...")
+                prompt_busca = (
+                    f"Qual é a URL direta do arquivo PDF da revista 'Em Cartaz' do Sesc SP de {m_nome} de {ano_val} "
+                    f"hospedada em https://www.sescsp.org.br/wp-content/uploads/... ? "
+                    f"Retorne a URL completa terminada em .pdf."
+                )
+                resp_ia = client.models.generate_content(
+                    model=modelo_ativo,
+                    contents=prompt_busca,
+                    config=types.GenerateContentConfig(
+                        tools=[types.Tool(google_search=types.GoogleSearch())],
+                        temperature=0.0,
+                    ),
+                )
+                texto_busca = resp_ia.text or ""
+                urls_grounding = []
+                if resp_ia.candidates and resp_ia.candidates[0].grounding_metadata:
+                    gm = resp_ia.candidates[0].grounding_metadata
+                    if gm.grounding_chunks:
+                        for chunk in gm.grounding_chunks:
+                            if chunk.web and chunk.web.uri:
+                                urls_grounding.append(chunk.web.uri)
+
+                for cand in extrair_pdfs_cartaz_de_texto(texto_busca) + urls_grounding:
+                    if m_nome in cand.lower() or str(ano_val) in cand:
+                        if validar_e_baixar_url(cand, destino_pdf):
+                            print(f"✅ PDF de {m_nome.upper()} baixado com sucesso!")
+                            return destino_pdf
+        except Exception as e:
+            print(f"   Aviso busca Gemini Search: {e}")
+
+    # Fallback para varredura WordPress/Páginas
+    print("🔍 Varredura geral nas fontes do Sesc SP...")
     fontes_sesc = [
         "https://www.sescsp.org.br/wp-json/wp/v2/media?mime_type=application/pdf&per_page=100",
         "https://www.sescsp.org.br/wp-json/wp/v2/media?search=Cartaz&per_page=50",
-        "https://www.sescsp.org.br/wp-json/wp/v2/posts?search=Em+Cartaz&per_page=20",
-        "https://www.sescsp.org.br/wp-json/wp/v2/pages?search=Em+Cartaz&per_page=20",
         "https://www.sescsp.org.br/programacao/",
         "https://www.sescsp.org.br/revista-em-cartaz/",
-        "https://www.sescsp.org.br/publicacoes/",
     ]
     for url_fonte in fontes_sesc:
         try:
@@ -324,9 +348,12 @@ def obter_e_baixar_pdf(agora: datetime, destino_pdf: Path) -> Path:
         except Exception:
             continue
 
+    if tentar_baixar_com_codigo_original_do_repo(destino_pdf):
+        return destino_pdf
+
     raise RuntimeError(
-        "❌ Não foi possível baixar o PDF automaticamente. "
-        "Cole o link direto do PDF na variável URL_PDF_FIXA no topo de scripts/sesc_musica_capital.py."
+        "❌ A programação do mês seguinte ainda não foi publicada pelo Sesc ou o link não foi localizado. "
+        "O script rodará novamente amanhã até que o PDF esteja disponível."
     )
 
 
@@ -362,7 +389,6 @@ def filtrar_paginas_musica(caminho_pdf_entrada: str, caminho_pdf_saida: str) -> 
             paginas_musica.append(i)
 
     if not paginas_musica:
-        print("ℹ️ Tarja textual 'MÚSICA' não isolada; enviando PDF completo para a IA filtrar.")
         doc.save(caminho_pdf_saida)
         total = len(doc)
         doc.close()
@@ -379,25 +405,24 @@ def filtrar_paginas_musica(caminho_pdf_entrada: str, caminho_pdf_saida: str) -> 
 
 
 # =====================================================================
-# 5. EXTRAÇÃO ESTRUTURADA COM FALLBACK AUTOMÁTICO DE MODELO GEMINI
+# 5. EXTRAÇÃO ESTRUTURADA COM GEMINI
 # =====================================================================
 
 def extrair_eventos_pdf(caminho_pdf: str) -> List[EventoMusical]:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("❌ A variável GEMINI_API_KEY não foi encontrada nos Secrets do GitHub!")
+        raise ValueError("❌ A variável GEMINI_API_KEY não foi encontrada!")
 
     client = genai.Client(api_key=api_key)
     fila_modelos = obter_fila_modelos_gemini(client)
     pdf_filtrado = str(PROJETO_DIR / "temp_secao_musica.pdf")
 
     qtd_paginas = filtrar_paginas_musica(caminho_pdf, pdf_filtrado)
-    print(f"📄 {qtd_paginas} página(s) da seção Música isoladas com sucesso.")
+    print(f"📄 {qtd_paginas} página(s) da seção Música isoladas.")
 
     arquivo_remoto = client.files.upload(file=pdf_filtrado)
 
     while getattr(arquivo_remoto, "state", None) and getattr(arquivo_remoto.state, "name", "") == "PROCESSING":
-        print("⏳ Aguardando processamento do PDF nos servidores Gemini...")
         time.sleep(3)
         arquivo_remoto = client.files.get(name=arquivo_remoto.name)
 
@@ -421,7 +446,7 @@ def extrair_eventos_pdf(caminho_pdf: str) -> List[EventoMusical]:
     try:
         for modelo_atual in fila_modelos:
             try:
-                print(f"🤖 Tentando extração estruturada com o modelo: {modelo_atual}...")
+                print(f"🤖 Tentando extração com o modelo: {modelo_atual}...")
                 resposta = client.models.generate_content(
                     model=modelo_atual,
                     contents=[arquivo_remoto, prompt],
@@ -432,12 +457,12 @@ def extrair_eventos_pdf(caminho_pdf: str) -> List[EventoMusical]:
                     ),
                 )
                 resultado = ListaProgramacao.model_validate_json(resposta.text)
-                print(f"✅ Extração concluída com sucesso usando o modelo: {modelo_atual} ({len(resultado.eventos)} eventos brutos)!")
+                print(f"✅ Extração concluída com sucesso usando: {modelo_atual} ({len(resultado.eventos)} shows)!")
                 break
             except Exception as e:
                 ultimo_erro = e
                 msg_erro = str(e)
-                print(f"⚠️ Modelo '{modelo_atual}' indisponível ({msg_erro[:110]}...). Tentando próximo da fila...")
+                print(f"⚠️ Modelo '{modelo_atual}' indisponível. Tentando próximo...")
                 match_sugerido = re.search(r"use models/([a-zA-Z0-9._-]+)", msg_erro)
                 if match_sugerido:
                     modelo_sugerido = match_sugerido.group(1)
@@ -445,7 +470,7 @@ def extrair_eventos_pdf(caminho_pdf: str) -> List[EventoMusical]:
                         fila_modelos.append(modelo_sugerido)
 
         if resultado is None:
-            raise RuntimeError(f"❌ Nenhum modelo da fila conseguiu processar o PDF. Último erro: {ultimo_erro}")
+            raise RuntimeError(f"❌ Nenhum modelo conseguiu processar. Último erro: {ultimo_erro}")
     finally:
         try:
             client.files.delete(name=arquivo_remoto.name)
@@ -539,8 +564,16 @@ def salvar_planilha_excel(eventos: List[EventoMusical], mes_ano_label: str, cami
 
 def main():
     agora = datetime.now()
-    mes_ano_label = f"{MESES_PT_CAPITAL[agora.month]} {agora.year}"
-    nome_xlsx = f"sesc_musica_capital_{agora.year}_{agora.month:02d}.xlsx"
+    
+    # Se estivermos nos últimos dias do mês (dia 20 em diante), o arquivo gerado deve ser nomeado com o mês seguinte
+    mes_alvo_idx = agora.month
+    ano_alvo = agora.year
+    if agora.day >= 20:
+        mes_alvo_idx = agora.month + 1 if agora.month < 12 else 1
+        ano_alvo = agora.year if agora.month < 12 else agora.year + 1
+
+    mes_ano_label = f"{MESES_PT_CAPITAL[mes_alvo_idx]} {ano_alvo}"
+    nome_xlsx = f"sesc_musica_capital_{ano_alvo}_{mes_alvo_idx:02d}.xlsx"
     caminho_xlsx = PROJETO_DIR / nome_xlsx
     caminho_pdf_temp = PROJETO_DIR / "em_cartaz_atual.pdf"
 
