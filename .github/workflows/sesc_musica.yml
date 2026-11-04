@@ -2,10 +2,9 @@ name: Sesc SP - Programacao Musical Mensal
 
 on:
   schedule:
-    # Roda todo dia às 12h UTC (9h da manhã em Brasília)
+    # Roda todo dia às 12h UTC (9h em Brasília) para capturar a virada de mês assim que publicada
     - cron: "0 12 * * *"
 
-  # Permite rodar manualmente pelo painel do GitHub
   workflow_dispatch:
     inputs:
       forcar_envio:
@@ -14,6 +13,16 @@ on:
         default: "false"
         type: choice
         options: ["false", "true"]
+      mes_alvo:
+        description: "Mês/Ano alvo opcional (ex: 12/2026 ou auto)"
+        required: false
+        default: "auto"
+        type: string
+      url_pdf:
+        description: "URL direta do PDF opcional (deixe em branco para busca automática)"
+        required: false
+        default: ""
+        type: string
 
 jobs:
   extrair-e-notificar:
@@ -45,6 +54,8 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MES_ALVO_SESC: ${{ github.event.inputs.mes_alvo || 'auto' }}
+          URL_PDF_SESC: ${{ github.event.inputs.url_pdf || '' }}
         run: |
           cd ${{ github.workspace }}
           python scripts/sesc_musica_capital.py
