@@ -11,6 +11,7 @@ Variáveis de ambiente necessárias (configuradas nos Secrets do GitHub):
 """
 
 import os
+import re
 import sys
 import json
 import hashlib
