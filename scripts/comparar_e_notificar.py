@@ -305,20 +305,29 @@ def enviar_email(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    agora = datetime.now()
-    mes_ref = f"{MESES_PT[agora.month]} {agora.year}"
+    # Localiza todos os arquivos sesc_musica_capital_YYYY_MM.xlsx na raiz do projeto
+    arquivos_xlsx = sorted(
+        PROJETO_DIR.glob("sesc_musica_capital_*.xlsx"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    if not arquivos_xlsx:
+        print("ℹ️ Nenhuma planilha encontrada para comparar hoje. Próxima verificação amanhã.")
+        sys.exit(0)
 
-    # Localiza o Excel recém-gerado
-    padrao = f"sesc_musica_capital_{agora.year}_{agora.month:02d}.xlsx"
-    xlsx_path = PROJETO_DIR / padrao
-    if not xlsx_path.exists():
-        # Procura na pasta scripts também
-        xlsx_path = SCRIPT_DIR.parent / padrao
-    if not xlsx_path.exists():
-        print(f"❌ Arquivo não encontrado: {padrao}")
-        sys.exit(1)
+    # Pega o arquivo modificado mais recentemente (ex: mês seguinte recém-extraído)
+    xlsx_path = arquivos_xlsx[-1]
 
-    print(f"📊 Lendo planilha: {xlsx_path.name}")
+    # Extrai o ano e o mês diretamente do nome do arquivo (sesc_musica_capital_YYYY_MM.xlsx)
+    m_nome = re.search(r"sesc_musica_capital_(\d{4})_(\d{2})\.xlsx$", xlsx_path.name)
+    if m_nome:
+        ano_arq = int(m_nome.group(1))
+        mes_arq = int(m_nome.group(2))
+        mes_ref = f"{MESES_PT[mes_arq]} {ano_arq}"
+    else:
+        agora = datetime.now()
+        mes_ref = f"{MESES_PT[agora.month]} {agora.year}"
+
+    print(f"📊 Lendo planilha: {xlsx_path.name} ({mes_ref})")
     dados_novos = extrair_dados_excel(xlsx_path)
     hash_novo   = calcular_hash(dados_novos)
     hash_antigo = carregar_hash_anterior()
@@ -328,7 +337,6 @@ def main():
 
     tem_mudancas = (hash_antigo is None) or (hash_novo != hash_antigo)
 
-    # Carrega dados anteriores para diff (se existirem)
     dados_antigos = []
     if HISTORICO_DIR.exists():
         arquivos_anteriores = sorted(HISTORICO_DIR.glob("*.xlsx"))
@@ -339,9 +347,6 @@ def main():
                 pass
 
     diff = diff_eventos(dados_antigos, dados_novos)
-
-    # Se não há mudanças e não é primeira execução, ainda envia e-mail mensal
-    # (comentar as linhas abaixo para enviar só quando houver mudanças)
     forcar_envio = os.environ.get("FORCAR_ENVIO", "false").lower() == "true"
 
     if tem_mudancas or forcar_envio:
@@ -350,16 +355,15 @@ def main():
         corpo = montar_email_html(mes_ref, len(dados_novos), diff, tem_mudancas)
         enviado = enviar_email(assunto, corpo, xlsx_path)
         if not enviado:
-            print("⚠️  E-mail não pôde ser enviado (verifique os Secrets do GitHub).")
-    else:
-        print("ℹ️  Sem mudanças detectadas. E-mail não enviado.")
+            print("⚠️ E-mail não pôde ser enviado (verifique os Secrets do GitHub).")
 
-    # Salva hash e copia para histórico
-    salvar_hash(hash_novo)
-    HISTORICO_DIR.mkdir(exist_ok=True)
-    import shutil
-    shutil.copy2(xlsx_path, HISTORICO_DIR / xlsx_path.name)
-    print(f"💾 Histórico salvo: historico/{xlsx_path.name}")
+        salvar_hash(hash_novo)
+        HISTORICO_DIR.mkdir(exist_ok=True)
+        import shutil
+        shutil.copy2(xlsx_path, HISTORICO_DIR / xlsx_path.name)
+        print(f"💾 Histórico salvo: historico/{xlsx_path.name}")
+    else:
+        print("ℹ️ Sem modificações em relação à última execução. O robô verificará novamente amanhã.")
 
 
 if __name__ == "__main__":
